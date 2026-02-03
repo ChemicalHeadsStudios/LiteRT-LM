@@ -36,6 +36,7 @@
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
 #include "runtime/components/model_resources.h"
+#include "runtime/components/lora_manager.h"
 #include "runtime/components/sampler.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/litert_compiled_model_executor_utils.h"
@@ -123,6 +124,12 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
       std::optional<ActivationDataType> logits_data_type = std::nullopt);
 
   using LogitsDataType = ActivationDataType;
+
+  // Sets the LoRA manager used for injecting LoRA buffers into forward passes.
+  // The caller retains ownership of the LoraManager.
+  void SetLoraManager(LoraManager* lora_manager) {
+    lora_manager_ = lora_manager;
+  }
 
   const ProcessedTokens& processed_tokens_for_testing() const {
     return llm_context_->processed_context().processed_tokens();
@@ -329,6 +336,10 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
 
   // The MTP drafter model.
   std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter_;
+
+  // Optional LoRA manager for injecting LoRA buffers into forward passes.
+  // Not owned by the executor.
+  LoraManager* lora_manager_ = nullptr;
 };
 
 // The static executor for the prefill-decode compiled model.
