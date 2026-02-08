@@ -64,14 +64,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = ENGINE_COMMON_DEPS + [
         "//runtime/core:engine_impl",
-        "//runtime/engine:engine_factory",
-        "//runtime/engine:engine_interface",
-        "//runtime/engine:engine_settings",
-        "//runtime/engine:io_types",
         "//runtime/engine:mezo",
-        "//runtime/executor:executor_settings_base",
-        "//runtime/proto:engine_cc_proto",
-        "//runtime/proto:sampler_params_cc_proto",
     ],
 )
 
@@ -88,14 +81,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = ENGINE_COMMON_DEPS + [
         "//runtime/core:engine_impl_cpu_only",
-        "//runtime/engine:engine_factory",
-        "//runtime/engine:engine_interface",
-        "//runtime/engine:engine_settings",
-        "//runtime/engine:io_types",
         "//runtime/engine:mezo",
-        "//runtime/executor:executor_settings_base",
-        "//runtime/proto:engine_cc_proto",
-        "//runtime/proto:sampler_params_cc_proto",
     ],
 )
 

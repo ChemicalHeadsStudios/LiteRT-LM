@@ -1784,7 +1784,6 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
 
   std::unique_ptr<EmbeddingLookupManager> embedding_lookup;
   std::unique_ptr<EmbeddingLookupManager> per_layer_embedding_lookup;
-<<<<<<< HEAD
   RETURN_IF_ERROR(InitializeEmbeddingLookups(
       lrt_env, resources, embedding_lookup, per_layer_embedding_lookup));
   std::unique_ptr<LlmLiteRtMtpDrafter> mtp_drafter;
