@@ -1475,6 +1475,9 @@ TEST_P(SessionBasicCancellationTest,
   done2.WaitForNotification();
   EXPECT_OK(status);
   // Reset worker thread pool to stop accessing session and fake executor.
+  // We need to reset session first because it holds a reference to the
+  // thread pool.
+  (*session).reset();
   worker_thread_pool_.reset();
 }
 
