@@ -47,6 +47,22 @@ TEST(FcParserUtilsTest, ParseToolCallWithStringArgument) {
               }])json")));
 }
 
+TEST(FcParserUtilsTest, ParseToolCallNoArgumentsEmptyBraces) {
+  EXPECT_THAT(ParseFcExpression(R"(call:tool_name{})"),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json([{
+                "name": "tool_name",
+                "arguments": {}
+              }])json")));
+}
+
+TEST(FcParserUtilsTest, ParseToolCallNoArgumentsNoBraces) {
+  EXPECT_THAT(ParseFcExpression(R"(call:tool_name)"),
+              IsOkAndHolds(nlohmann::ordered_json::parse(R"json([{
+                "name": "tool_name",
+                "arguments": {}
+              }])json")));
+}
+
 TEST(FcParserUtilsTest, ParseToolCallWithSingleQuotesInStringArgument) {
   EXPECT_THAT(ParseFcExpression(
                   R"(call:tool_name{text:<escape>foo 'bar' baz<escape>})"),
