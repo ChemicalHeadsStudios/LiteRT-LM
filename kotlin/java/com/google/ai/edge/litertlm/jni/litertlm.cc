@@ -100,19 +100,34 @@ void ThrowLiteRtLmJniException(JNIEnv* env, const std::string& message) {
 jstring NewStringStandardUTF(JNIEnv* env, std::string standard_utf8_str) {
   // Create a jbyteArray from the UTF-8 string
   jbyteArray bytes = env->NewByteArray(standard_utf8_str.length());
+  if (bytes == nullptr) return nullptr;
   env->SetByteArrayRegion(
       bytes, 0, standard_utf8_str.length(),
       reinterpret_cast<const jbyte*>(standard_utf8_str.c_str()));
 
   // Get the java.lang.String class
   jclass string_class = env->FindClass("java/lang/String");
+  if (string_class == nullptr) {
+    env->DeleteLocalRef(bytes);
+    return nullptr;
+  }
 
   // Get the constructor for String(byte[], String)
   jmethodID string_ctor =
       env->GetMethodID(string_class, "<init>", "([BLjava/lang/String;)V");
+  if (string_ctor == nullptr) {
+    env->DeleteLocalRef(string_class);
+    env->DeleteLocalRef(bytes);
+    return nullptr;
+  }
 
   // Create a jstring for the charset name "UTF-8"
   jstring charset_name = env->NewStringUTF("UTF-8");
+  if (charset_name == nullptr) {
+    env->DeleteLocalRef(string_class);
+    env->DeleteLocalRef(bytes);
+    return nullptr;
+  }
 
   // Create the new String object
   jstring result =
@@ -904,6 +919,11 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
 
   jobject callback_global = env->NewGlobalRef(callback);
   jclass callback_class = env->GetObjectClass(callback_global);
+  if (callback_class == nullptr) {
+    env->DeleteGlobalRef(callback_global);
+    ThrowLiteRtLmJniException(env, "Failed to get callback class");
+    return;
+  }
   jmethodID on_message_mid =
       env->GetMethodID(callback_class, "onMessage", "(Ljava/lang/String;)V");
   jmethodID on_complete_mid = env->GetMethodID(callback_class, "onDone", "()V");
@@ -911,15 +931,27 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
       env->GetMethodID(callback_class, "onError", "(ILjava/lang/String;)V");
   env->DeleteLocalRef(callback_class);
 
+  if (on_message_mid == nullptr || on_complete_mid == nullptr ||
+      on_error_mid == nullptr) {
+    env->DeleteGlobalRef(callback_global);
+    ThrowLiteRtLmJniException(env, "Failed to get callback method IDs");
+    return;
+  }
+
+  auto terminal_reached = std::make_shared<bool>(false);
+
   absl::AnyInvocable<void(absl::StatusOr<Message>)> callback_fn =
-      [jvm, callback_global, on_message_mid, on_complete_mid,
-       on_error_mid](absl::StatusOr<Message> message) {
+      [jvm, callback_global, on_message_mid, on_complete_mid, on_error_mid,
+       terminal_reached](absl::StatusOr<Message> message) {
+        if (*terminal_reached) return;
         bool attached = false;
         JNIEnv* env = GetJniEnvAndAttach(jvm, &attached);
         if (!env) return;
 
         // This lambda is to clean up the global reference.
-        auto on_done_fn = [jvm, callback_global]() {
+        auto on_done_fn = [jvm, callback_global, terminal_reached]() {
+          if (*terminal_reached) return;
+          *terminal_reached = true;
           bool attached = false;
           JNIEnv* env = GetJniEnvAndAttach(jvm, &attached);
           if (env) {
