@@ -70,8 +70,9 @@ cc_library(
     deps = [
         ":audio_preprocessor",
         ":mel_filterbank",
-        "@com_google_absl//absl/log:absl_log",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/log:absl_log",
         "@litert//litert/cc:litert_tensor_buffer_types",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",

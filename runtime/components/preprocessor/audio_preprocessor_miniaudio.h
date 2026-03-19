@@ -69,7 +69,12 @@ class AudioPreprocessorMiniAudio : public AudioPreprocessor {
   // Resets the preprocessor to its initial state.
   void Reset() override {
     input_queue_.clear();
-    samples_to_next_step_ = config_.GetFrameLength();
+    if (config_.GetSemicausalPadding()) {
+      samples_to_next_step_ = config_.GetFrameLength() - config_.GetHopLength();
+      input_queue_.resize(config_.GetHopLength(), 0.0f);
+    } else {
+      samples_to_next_step_ = config_.GetFrameLength();
+    }
   }
 
   // Copy constructor for cloning the audio preprocessor.
@@ -83,7 +88,6 @@ class AudioPreprocessorMiniAudio : public AudioPreprocessor {
         other.config_.GetFftBins(), other.config_.GetSampleRateHz(),
         other.config_.GetNumMelBins(), other.config_.GetMelLowHz(),
         other.config_.GetMelHighHz()));
-    input_queue_ = other.input_queue_;
   }
 
   // Copy assignment operator for cloning the audio preprocessor.
@@ -107,7 +111,12 @@ class AudioPreprocessorMiniAudio : public AudioPreprocessor {
       : config_(config),
         mel_filterbank_(std::move(mel_filterbank)),
         input_queue_(std::vector<float>()) {
-    samples_to_next_step_ = config_.GetFrameLength();
+    if (config.GetSemicausalPadding()) {
+      samples_to_next_step_ = config.GetFrameLength() - config.GetHopLength();
+      input_queue_.resize(config.GetHopLength(), 0.0f);
+    } else {
+      samples_to_next_step_ = config.GetFrameLength();
+    }
   }
 
   absl::Status PcmFramesToSpectrogram(absl::Span<const float> pcm_frames,
