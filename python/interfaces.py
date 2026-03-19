@@ -109,6 +109,14 @@ class AbstractEngine(abc.ABC):
         tool_event_handler: A handler for tool call and tool response events.
     """
 
+  @abc.abstractmethod
+  def create_session(self) -> AbstractSession:
+    """Creates a new session for this engine.
+
+    Returns:
+        A new session instance for low-level interaction with the model.
+    """
+
 
 class AbstractConversation(abc.ABC):
   """Abstract base class for managing LiteRT-LM conversations.
@@ -229,3 +237,82 @@ class AbstractBenchmark(abc.ABC):
   @abc.abstractmethod
   def run(self) -> BenchmarkInfo:
     """Runs the benchmark and returns the result."""
+
+
+@dataclasses.dataclass
+class Responses:
+  """A container to host the model responses.
+
+  This class is only used in the Session API. "Batch size" is the number of
+  parallel response processed in decode. Most models have batch size equals 1.
+
+  Attributes:
+      texts: The generated text(s) from the model. The list length is equal to
+        the batch size in "run_decode".  This field is only used in
+        "run_decode". "run_text_scoring".
+      scores: The scores associated with the generated text(s). The list length
+        is equal to length of the "target_text" in "run_text_scoring" or the
+        batch size in "run_decode".
+      token_lengths: The number of tokens in each generated text. The list
+        length is equal to length of the "target_text" in "run_text_scoring".
+        This field is only used in `run_text_scoring` when `store_token_lengths`
+        is True.
+  """
+
+  texts: list[str] = dataclasses.field(default_factory=list)
+  scores: list[float] = dataclasses.field(default_factory=list)
+  token_lengths: list[int] = dataclasses.field(default_factory=list)
+
+
+# TODO(b/482060476): Add clone() API once switching to advanced engine.
+class AbstractSession(abc.ABC):
+  """Abstract base class for managing LiteRT-LM sessions."""
+
+  def __init__(self):
+    """Initializes the instance."""
+
+  def __enter__(self) -> AbstractSession:
+    """Initializes the session."""
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    """Releases the session."""
+    del exc_type, exc_val, exc_tb
+
+  @abc.abstractmethod
+  def run_prefill(self, contents: list[str]) -> None:
+    """Runs the prefill stage of the session.
+
+    TODO(b/482060476): Support multi-modality in contents.
+
+    Args:
+        contents: A list of input strings to prefill the model with. Note that
+          the user can break down their prompt/query into multiple chunks and
+          call this function multiple times.
+    """
+
+  @abc.abstractmethod
+  def run_decode(self) -> Responses:
+    """Runs the decode stage of the session.
+
+    Returns:
+        The generated response from the model based on the input prompt/query
+        added after using run_prefill.
+    """
+
+  @abc.abstractmethod
+  def run_text_scoring(
+      self, target_text: list[str], store_token_lengths: bool = False
+  ) -> Responses:
+    """Runs the scoring stage of the session.
+
+    Args:
+        target_text: A list of target strings to score.
+        store_token_lengths: Whether to store the token lengths of the target
+          texts in the result. If True, the token lengths will be included in
+          the return value: `Responses`. Otherwise, it will be None.
+
+    Returns:
+        Responses: The log likelihood scores of the target text given the
+        existing session state.
+    """
