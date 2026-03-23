@@ -206,32 +206,10 @@ fun tool(openApiTool: OpenApiTool): ToolProvider {
  *
  * @property tools A list of [ToolProvider].
  */
-class ToolManager(val tools: List<Any> = emptyList()) {
-
-  @OptIn(ExperimentalApi::class)
-  private val useSnakeCase = ExperimentalFlags.convertCamelToSnakeCaseInToolDescription
+class ToolManager(val tools: List<ToolProvider> = emptyList()) {
 
   private val internalTools: Map<String, InternalJsonTool> =
-    tools.fold(mapOf()) { acc, tool ->
-      acc +
-        when (tool) {
-          is ToolProvider -> tool.provideTools()
-          else -> {
-            // For backward compatibility, handle tool that does not implement ToolProvider similar
-            // to ToolSet.
-            //
-            // TODO(b/476130607): Remove this once all tools implement ToolProvider.
-            val toolClass = tool.javaClass.kotlin
-            toolClass.functions
-              .filter { function -> function.annotations.any { annotation -> annotation is Tool } }
-              .map { function ->
-                (if (useSnakeCase) function.name.camelToSnakeCase() else function.name) to
-                  ReflectionTool(tool, function, useSnakeCase)
-              }
-              .toMap()
-          }
-        }
-    }
+    tools.fold(mapOf()) { acc, tool -> acc + tool.provideTools() }
 
   /**
    * Executes a tool function by its name with the given parameters.

@@ -94,8 +94,7 @@ data class EngineConfig(
 data class ConversationConfig(
   val systemInstruction: Contents? = null,
   val initialMessages: List<Message> = listOf(),
-  // TODO(b/476130607): Switch the type to List<ToolProvider>.
-  val tools: List<Any> = listOf(),
+  val tools: List<ToolProvider> = listOf(),
   val samplerConfig: SamplerConfig? = null,
   @Deprecated("Use systemInstruction instead. e.g., systemInstrction = Contents.of(\"Be helpful\")")
   val systemMessage: Message? = null,
