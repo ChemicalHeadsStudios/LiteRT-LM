@@ -355,12 +355,7 @@ class LlmExecutorSettings : public ExecutorSettingsBase {
   std::variant<GpuArtisanConfig, GpuConfig, CpuConfig> backend_config_;
 
   // Backend to use for sampling.
-#if defined(_WIN32)
-  // TODO:(b/496180324) A temporary fix for Windows GPU path.
-  Backend sampler_backend_ = Backend::CPU;
-#else
   Backend sampler_backend_ = Backend::UNSPECIFIED;
-#endif
 
   // Optional advanced settings.
   std::optional<AdvancedSettings> advanced_settings_;
