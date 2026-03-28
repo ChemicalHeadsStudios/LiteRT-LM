@@ -202,7 +202,6 @@ class LiteRTLMCLI:
       decode_tokens: int = 256,
       backend: str = "cpu",
       verbose: bool = False,
-      **kwargs,
   ):
     """Benchmarks a LiteRT-LM model.
 
@@ -213,9 +212,7 @@ class LiteRTLMCLI:
       decode_tokens: The number of tokens to decode.
       backend: The backend to use (cpu or gpu).
       verbose: Whether to enable verbose logging.
-      **kwargs: Additional arguments.
     """
-    android = kwargs.get("android", False)
     if verbose:
       litert_lm.set_min_log_severity(litert_lm.LogSeverity.VERBOSE)
 
@@ -223,7 +220,7 @@ class LiteRTLMCLI:
     model_obj.benchmark(
         prefill_tokens=prefill_tokens,
         decode_tokens=decode_tokens,
-        is_android=android,
+        is_android=False,
         backend=backend,
     )
 
@@ -234,7 +231,6 @@ class LiteRTLMCLI:
       backend="cpu",
       preset=None,
       verbose=False,
-      **kwargs,
   ):
     r'''Runs a LiteRT-LM model interactively or with a single prompt.
 
@@ -260,9 +256,7 @@ class LiteRTLMCLI:
       preset: Path to a Python file containing tool functions and system
         instructions.
       verbose: Whether to enable verbose logging.
-      **kwargs: Additional arguments.
     '''
-    android = kwargs.get("android", False)
     if verbose:
       litert_lm.set_min_log_severity(litert_lm.LogSeverity.VERBOSE)
 
@@ -284,7 +278,10 @@ class LiteRTLMCLI:
         return
 
     model_obj.run_interactive(
-        prompt=prompt, is_android=android, backend=backend, preset=preset
+        prompt=prompt,
+        is_android=False,
+        backend=backend,
+        preset=preset,
     )
 
 
