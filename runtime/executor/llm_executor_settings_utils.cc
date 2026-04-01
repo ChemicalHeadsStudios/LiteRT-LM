@@ -270,6 +270,12 @@ absl::StatusOr<litert::Options> CreateCompilationOptions(
       LITERT_ASSIGN_OR_RETURN(auto& runtime_options,
                               compilation_options.GetRuntimeOptions());
       runtime_options.SetCompressQuantizationZeroPoints(true);
+      AdvancedSettings advanced_settings;
+      if (executor_settings.GetAdvancedSettings()) {
+        advanced_settings = *executor_settings.GetAdvancedSettings();
+      }
+      runtime_options.SetDisableDelegateClustering(
+          advanced_settings.disable_delegate_clustering);
       compilation_options.SetHardwareAccelerators(HwAccelerators::kCpu);
       break;
     }

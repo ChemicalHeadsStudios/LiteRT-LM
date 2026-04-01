@@ -229,6 +229,10 @@ struct AdvancedSettings {
   // If true, the executor enables speculative decoding.
   bool enable_speculative_decoding = false;
 
+  // If true, the executor disables delegate clustering. Can be useful for cases
+  // where the default model delegate partitioning is not optimal.
+  bool disable_delegate_clustering = false;
+
   bool operator==(const AdvancedSettings& other) const {
     return prefill_batch_sizes == other.prefill_batch_sizes &&
            num_output_candidates == other.num_output_candidates &&
@@ -255,7 +259,8 @@ struct AdvancedSettings {
                other.allow_src_quantized_fc_conv_ops &&
            hint_waiting_for_completion == other.hint_waiting_for_completion &&
            gpu_context_low_priority == other.gpu_context_low_priority &&
-           enable_speculative_decoding == other.enable_speculative_decoding;
+           enable_speculative_decoding == other.enable_speculative_decoding &&
+           disable_delegate_clustering == other.disable_delegate_clustering;
   }
 };
 std::ostream& operator<<(std::ostream& os, const AdvancedSettings& settings);

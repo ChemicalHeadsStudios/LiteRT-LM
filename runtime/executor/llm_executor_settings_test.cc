@@ -278,6 +278,7 @@ TEST(LlmExecutorConfigTest, LlmExecutorSettingsWithAdvancedSettings) {
       .allow_src_quantized_fc_conv_ops = true,
       .hint_waiting_for_completion = false,
       .enable_speculative_decoding = false,
+      .disable_delegate_clustering = false,
   });
 
   std::stringstream oss;
@@ -328,6 +329,7 @@ allow_src_quantized_fc_conv_ops: 1
 hint_waiting_for_completion: 0
 gpu_context_low_priority: Not set
 enable_speculative_decoding: 0
+disable_delegate_clustering: 0
 
 )");
   EXPECT_EQ(oss.str(), expected_output);

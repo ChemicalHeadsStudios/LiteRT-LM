@@ -103,6 +103,8 @@ std::ostream& operator<<(std::ostream& os, const AdvancedSettings& settings) {
   }
   os << "enable_speculative_decoding: " << settings.enable_speculative_decoding
      << "\n";
+  os << "disable_delegate_clustering: " << settings.disable_delegate_clustering
+     << "\n";
   return os;
 }
 
