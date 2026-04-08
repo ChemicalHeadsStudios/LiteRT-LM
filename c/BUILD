@@ -111,3 +111,30 @@ cc_test(
         "//runtime/executor:llm_executor_settings",
     ],
 )
+
+cc_binary(
+    name = "litert_lm_capi",
+    linkshared = True,
+    srcs = [
+        "engine.cc",
+        "litert_lm_logging.cc",
+        "engine.h",
+        "litert_lm_logging.h",
+    ],
+    additional_linker_inputs = select({
+        "@platforms//os:windows": [
+            "@litert//litert/c:windows_exported_symbols.def",
+        ],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "@platforms//os:windows": [
+            "/DEF:$(location @litert//litert/c:windows_exported_symbols.def)",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    deps = ENGINE_COMMON_DEPS + [
+        "//runtime/core:engine_impl",
+    ],
+)

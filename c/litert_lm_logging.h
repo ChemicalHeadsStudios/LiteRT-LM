@@ -15,13 +15,23 @@
 #ifndef THIRD_PARTY_ODML_LITERT_LM_C_LITERT_LM_LOGGING_H_
 #define THIRD_PARTY_ODML_LITERT_LM_C_LITERT_LM_LOGGING_H_
 
+#ifndef LITERT_LM_C_API_EXPORT
+#if defined(_WIN32)
+#define LITERT_LM_C_API_EXPORT __declspec(dllexport)
+#else
+#define LITERT_LM_C_API_EXPORT
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+LITERT_LM_C_API_EXPORT
 void litert_lm_log(int severity, const char* file, int line, const char* format,
                    ...);
 
+LITERT_LM_C_API_EXPORT
 void litert_lm_set_min_log_level(int level);
 
 #ifdef __cplusplus
