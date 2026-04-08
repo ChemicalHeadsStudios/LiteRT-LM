@@ -934,6 +934,45 @@ void litert_lm_engine_settings_set_gpu_decode_steps_per_sync(
   }
 }
 
+void litert_lm_engine_settings_set_speculative_decoding(
+    LiteRtLmEngineSettings* settings, bool enable) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    litert::lm::AdvancedSettings advanced;
+    if (main.GetAdvancedSettings().has_value()) {
+      advanced = *main.GetAdvancedSettings();
+    }
+    advanced.enable_speculative_decoding = enable;
+    main.SetAdvancedSettings(advanced);
+  }
+}
+
+void litert_lm_engine_settings_set_num_output_candidates(
+    LiteRtLmEngineSettings* settings, int num_candidates) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    litert::lm::AdvancedSettings advanced;
+    if (main.GetAdvancedSettings().has_value()) {
+      advanced = *main.GetAdvancedSettings();
+    }
+    advanced.num_output_candidates = num_candidates;
+    main.SetAdvancedSettings(advanced);
+  }
+}
+
+void litert_lm_engine_settings_set_allow_quantized_ops(
+    LiteRtLmEngineSettings* settings, bool allow) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    litert::lm::AdvancedSettings advanced;
+    if (main.GetAdvancedSettings().has_value()) {
+      advanced = *main.GetAdvancedSettings();
+    }
+    advanced.allow_src_quantized_fc_conv_ops = allow;
+    main.SetAdvancedSettings(advanced);
+  }
+}
+
 // A3: Tokenizer access
 
 int litert_lm_engine_count_tokens(LiteRtLmEngine* engine, const char* text) {

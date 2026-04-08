@@ -554,6 +554,21 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_engine_settings_set_gpu_decode_steps_per_sync(
     LiteRtLmEngineSettings* settings, int num_steps);
 
+// Sets whether to enable speculative decoding (MTP drafter). Default: false.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_speculative_decoding(
+    LiteRtLmEngineSettings* settings, bool enable);
+
+// Sets the number of output candidates (decode batch size). Default: 1.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_num_output_candidates(
+    LiteRtLmEngineSettings* settings, int num_candidates);
+
+// Sets whether to allow quantized FC conv ops on GPU. Can improve perf at quality cost.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_allow_quantized_ops(
+    LiteRtLmEngineSettings* settings, bool allow);
+
 // A3: Tokenizer access.
 
 // Counts tokens for a text string. Returns -1 on error.
