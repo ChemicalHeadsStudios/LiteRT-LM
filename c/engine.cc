@@ -203,6 +203,16 @@ LiteRtLmConversationConfig* litert_lm_conversation_config_create(
     LiteRtLmEngine* engine, const LiteRtLmSessionConfig* session_config,
     const char* system_message_json, const char* tools_json,
     const char* messages_json, bool enable_constrained_decoding) {
+  return litert_lm_conversation_config_create_ex(
+      engine, session_config, system_message_json, tools_json,
+      messages_json, enable_constrained_decoding, nullptr);
+}
+
+LiteRtLmConversationConfig* litert_lm_conversation_config_create_ex(
+    LiteRtLmEngine* engine, const LiteRtLmSessionConfig* session_config,
+    const char* system_message_json, const char* tools_json,
+    const char* messages_json, bool enable_constrained_decoding,
+    const char* extra_context_json) {
   if (!engine || !engine->engine) {
     return nullptr;
   }
@@ -258,6 +268,17 @@ LiteRtLmConversationConfig* litert_lm_conversation_config_create(
     } else {
       ABSL_LOG(ERROR) << "Failed to parse tools JSON or not an array: "
                       << tools_json;
+    }
+  }
+
+  if (extra_context_json) {
+    auto extra_context =
+        nlohmann::ordered_json::parse(extra_context_json, nullptr, false);
+    if (!extra_context.is_discarded()) {
+      json_preface.extra_context = extra_context;
+    } else {
+      ABSL_LOG(ERROR) << "Failed to parse extra_context JSON: "
+                      << extra_context_json;
     }
   }
 

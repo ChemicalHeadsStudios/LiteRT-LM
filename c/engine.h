@@ -125,6 +125,15 @@ LiteRtLmConversationConfig* litert_lm_conversation_config_create(
     const char* system_message_json, const char* tools_json,
     const char* messages_json, bool enable_constrained_decoding);
 
+// Extended conversation config creation with extra_context (e.g. enable_thinking).
+// @param extra_context_json JSON object for model-specific context, or NULL.
+LITERT_LM_C_API_EXPORT
+LiteRtLmConversationConfig* litert_lm_conversation_config_create_ex(
+    LiteRtLmEngine* engine, const LiteRtLmSessionConfig* session_config,
+    const char* system_message_json, const char* tools_json,
+    const char* messages_json, bool enable_constrained_decoding,
+    const char* extra_context_json);
+
 // Destroys a LiteRT LM Conversation Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT
