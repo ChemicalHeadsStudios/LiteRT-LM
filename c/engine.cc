@@ -36,6 +36,9 @@
 #include "runtime/engine/engine_factory.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
+#include "runtime/components/constrained_decoding/constraint_provider_config.h"
+#include "runtime/components/constrained_decoding/llg_constraint_config.h"
+#include "runtime/components/tokenizer.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/llm_executor_settings.h"
 #include "runtime/proto/sampler_params.pb.h"
@@ -770,6 +773,226 @@ LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     return nullptr;
   }
   return new LiteRtLmBenchmarkInfo{std::move(*benchmark_info)};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extensions (BadLads fork)
+// ─────────────────────────────────────────────────────────────────────────────
+
+litert::lm::OptionalArgs CreateOptionalArgsEx(
+    const char* extra_context, int max_output_tokens,
+    LiteRtLmConstraintType constraint_type, const char* constraint_string) {
+  litert::lm::OptionalArgs args = CreateOptionalArgs(extra_context);
+  if (max_output_tokens >= 0) {
+    args.max_output_tokens = max_output_tokens;
+  }
+  if (constraint_type != kConstraintNone && constraint_string) {
+    litert::lm::LlGuidanceConstraintArg constraint_arg;
+    switch (constraint_type) {
+      case kConstraintRegex:
+        constraint_arg.constraint_type =
+            litert::lm::LlgConstraintType::kRegex;
+        break;
+      case kConstraintJsonSchema:
+        constraint_arg.constraint_type =
+            litert::lm::LlgConstraintType::kJsonSchema;
+        break;
+      case kConstraintLark:
+        constraint_arg.constraint_type =
+            litert::lm::LlgConstraintType::kLark;
+        break;
+      default:
+        break;
+    }
+    constraint_arg.constraint_string = constraint_string;
+    args.decoding_constraint = constraint_arg;
+  }
+  return args;
+}
+
+// A1: Extended SendMessage
+
+LiteRtLmJsonResponse* litert_lm_conversation_send_message_ex(
+    LiteRtLmConversation* conversation, const char* message_json,
+    const char* extra_context, int max_output_tokens,
+    LiteRtLmConstraintType constraint_type, const char* constraint_string) {
+  if (!conversation || !conversation->conversation) {
+    return nullptr;
+  }
+  nlohmann::json json_message =
+      nlohmann::json::parse(message_json, nullptr, false);
+  if (json_message.is_discarded()) {
+    ABSL_LOG(ERROR) << "Failed to parse message JSON.";
+    return nullptr;
+  }
+  auto optional_args = CreateOptionalArgsEx(
+      extra_context, max_output_tokens, constraint_type, constraint_string);
+  auto response = conversation->conversation->SendMessage(
+      json_message, std::move(optional_args));
+  if (!response.ok()) {
+    ABSL_LOG(ERROR) << "Failed to send message: " << response.status();
+    return nullptr;
+  }
+  auto* c_response = new LiteRtLmJsonResponse;
+  c_response->json_string = response->dump();
+  return c_response;
+}
+
+int litert_lm_conversation_send_message_stream_ex(
+    LiteRtLmConversation* conversation, const char* message_json,
+    const char* extra_context, int max_output_tokens,
+    LiteRtLmConstraintType constraint_type, const char* constraint_string,
+    LiteRtLmStreamCallback callback, void* callback_data) {
+  if (!conversation || !conversation->conversation) {
+    return -1;
+  }
+  nlohmann::json json_message =
+      nlohmann::json::parse(message_json, nullptr, false);
+  if (json_message.is_discarded()) {
+    ABSL_LOG(ERROR) << "Failed to parse message JSON.";
+    return -1;
+  }
+  auto optional_args = CreateOptionalArgsEx(
+      extra_context, max_output_tokens, constraint_type, constraint_string);
+  absl::Status status = conversation->conversation->SendMessageAsync(
+      json_message, CreateConversationCallback(callback, callback_data),
+      std::move(optional_args));
+  if (!status.ok()) {
+    ABSL_LOG(ERROR) << "Failed to start message stream: " << status;
+    return static_cast<int>(status.code());
+  }
+  return 0;
+}
+
+// A2: Executor settings
+
+void litert_lm_engine_settings_set_num_threads(
+    LiteRtLmEngineSettings* settings, int num_threads) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    auto config = main.MutableBackendConfig<litert::lm::CpuConfig>();
+    if (config.ok()) {
+      config->number_of_threads = num_threads;
+      main.SetBackendConfig(*config);
+    }
+  }
+}
+
+void litert_lm_engine_settings_set_gpu_max_top_k(
+    LiteRtLmEngineSettings* settings, int max_top_k) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    auto config = main.MutableBackendConfig<litert::lm::GpuArtisanConfig>();
+    if (config.ok()) {
+      config->max_top_k = max_top_k;
+      main.SetBackendConfig(*config);
+    } else {
+      auto gpu_config = main.MutableBackendConfig<litert::lm::GpuConfig>();
+      if (gpu_config.ok()) {
+        gpu_config->max_top_k = max_top_k;
+        main.SetBackendConfig(*gpu_config);
+      }
+    }
+  }
+}
+
+void litert_lm_engine_settings_set_gpu_low_priority(
+    LiteRtLmEngineSettings* settings, bool low_priority) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    litert::lm::AdvancedSettings advanced;
+    if (main.GetAdvancedSettings().has_value()) {
+      advanced = *main.GetAdvancedSettings();
+    }
+    advanced.gpu_context_low_priority = low_priority;
+    main.SetAdvancedSettings(advanced);
+  }
+}
+
+void litert_lm_engine_settings_set_preferred_gpu_device(
+    LiteRtLmEngineSettings* settings, const char* device_substr) {
+  if (settings && settings->settings && device_substr) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    litert::lm::AdvancedSettings advanced;
+    if (main.GetAdvancedSettings().has_value()) {
+      advanced = *main.GetAdvancedSettings();
+    }
+    advanced.preferred_device_substr = device_substr;
+    main.SetAdvancedSettings(advanced);
+  }
+}
+
+void litert_lm_engine_settings_set_gpu_decode_steps_per_sync(
+    LiteRtLmEngineSettings* settings, int num_steps) {
+  if (settings && settings->settings) {
+    auto& main = settings->settings->GetMutableMainExecutorSettings();
+    auto config = main.MutableBackendConfig<litert::lm::GpuArtisanConfig>();
+    if (config.ok()) {
+      config->num_decode_steps_per_sync = num_steps;
+      main.SetBackendConfig(*config);
+    }
+  }
+}
+
+// A3: Tokenizer access
+
+int litert_lm_engine_count_tokens(LiteRtLmEngine* engine, const char* text) {
+  if (!engine || !engine->engine || !text) {
+    return -1;
+  }
+  const auto& tokenizer = engine->engine->GetTokenizer();
+  auto token_ids =
+      const_cast<litert::lm::Tokenizer&>(tokenizer).TextToTokenIds(text);
+  if (!token_ids.ok()) {
+    ABSL_LOG(ERROR) << "Failed to tokenize: " << token_ids.status();
+    return -1;
+  }
+  return static_cast<int>(token_ids->size());
+}
+
+// A4: Session checkpointing
+
+int litert_lm_session_save_checkpoint(LiteRtLmSession* session,
+                                      const char* label) {
+  if (!session || !session->session || !label) {
+    return -1;
+  }
+  absl::Status status = session->session->SaveCheckpoint(label);
+  if (!status.ok()) {
+    ABSL_LOG(WARNING) << "SaveCheckpoint failed: " << status;
+    return -1;
+  }
+  return 0;
+}
+
+int litert_lm_session_rewind_to_checkpoint(LiteRtLmSession* session,
+                                           const char* label) {
+  if (!session || !session->session || !label) {
+    return -1;
+  }
+  absl::Status status = session->session->RewindToCheckpoint(label);
+  if (!status.ok()) {
+    ABSL_LOG(WARNING) << "RewindToCheckpoint failed: " << status;
+    return -1;
+  }
+  return 0;
+}
+
+// A5: Conversation cloning
+
+LiteRtLmConversation* litert_lm_conversation_clone(
+    LiteRtLmConversation* conversation) {
+  if (!conversation || !conversation->conversation) {
+    return nullptr;
+  }
+  auto cloned = conversation->conversation->Clone();
+  if (!cloned.ok()) {
+    ABSL_LOG(ERROR) << "Failed to clone conversation: " << cloned.status();
+    return nullptr;
+  }
+  auto* c_conversation = new LiteRtLmConversation;
+  c_conversation->conversation = *std::move(cloned);
+  return c_conversation;
 }
 
 }  // extern "C"

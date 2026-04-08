@@ -495,6 +495,90 @@ LITERT_LM_C_API_EXPORT
 LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
     LiteRtLmConversation* conversation);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Extensions (BadLads fork)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A1: Per-message constraints and token limits.
+
+// Constraint types for structured output.
+typedef enum {
+  kConstraintNone = -1,
+  kConstraintRegex = 0,
+  kConstraintJsonSchema = 1,
+  kConstraintLark = 2,
+} LiteRtLmConstraintType;
+
+// Extended send with per-message constraints and token limit.
+// @param max_output_tokens Per-message token limit, or -1 to use session default.
+// @param constraint_type Constraint type, or kConstraintNone for no constraint.
+// @param constraint_string The constraint pattern (regex, JSON schema, or Lark grammar). NULL if no constraint.
+LITERT_LM_C_API_EXPORT
+LiteRtLmJsonResponse* litert_lm_conversation_send_message_ex(
+    LiteRtLmConversation* conversation, const char* message_json,
+    const char* extra_context, int max_output_tokens,
+    LiteRtLmConstraintType constraint_type, const char* constraint_string);
+
+// Extended streaming send with per-message constraints and token limit.
+LITERT_LM_C_API_EXPORT
+int litert_lm_conversation_send_message_stream_ex(
+    LiteRtLmConversation* conversation, const char* message_json,
+    const char* extra_context, int max_output_tokens,
+    LiteRtLmConstraintType constraint_type, const char* constraint_string,
+    LiteRtLmStreamCallback callback, void* callback_data);
+
+// A2: Executor settings (CPU/GPU tuning).
+
+// Sets number of CPU threads for XNNPACK inference. Default: 4.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_num_threads(
+    LiteRtLmEngineSettings* settings, int num_threads);
+
+// Sets GPU max top-k. Default: 1 (greedy only).
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_gpu_max_top_k(
+    LiteRtLmEngineSettings* settings, int max_top_k);
+
+// Sets GPU low context priority. true = won't starve game rendering.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_gpu_low_priority(
+    LiteRtLmEngineSettings* settings, bool low_priority);
+
+// Sets preferred GPU device name substring (e.g. "NVIDIA", "Intel").
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_preferred_gpu_device(
+    LiteRtLmEngineSettings* settings, const char* device_substr);
+
+// Sets decode steps per GPU sync. Default: 1.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_gpu_decode_steps_per_sync(
+    LiteRtLmEngineSettings* settings, int num_steps);
+
+// A3: Tokenizer access.
+
+// Counts tokens for a text string. Returns -1 on error.
+LITERT_LM_C_API_EXPORT
+int litert_lm_engine_count_tokens(LiteRtLmEngine* engine, const char* text);
+
+// A4: Session checkpointing.
+
+// Saves session state at a named checkpoint. Returns 0 on success.
+LITERT_LM_C_API_EXPORT
+int litert_lm_session_save_checkpoint(LiteRtLmSession* session,
+                                      const char* label);
+
+// Rewinds session to a saved checkpoint. Returns 0 on success.
+LITERT_LM_C_API_EXPORT
+int litert_lm_session_rewind_to_checkpoint(LiteRtLmSession* session,
+                                           const char* label);
+
+// A5: Conversation cloning.
+
+// Deep-clones a conversation (KV cache + state). Returns NULL on error.
+LITERT_LM_C_API_EXPORT
+LiteRtLmConversation* litert_lm_conversation_clone(
+    LiteRtLmConversation* conversation);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
