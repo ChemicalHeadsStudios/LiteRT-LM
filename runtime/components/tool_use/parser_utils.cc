@@ -142,8 +142,13 @@ absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
             " with error: ", tool_calls.status().message()));
       }
       for (const auto& tool_call : *tool_calls) {
+        // A7: Assign a unique tool_call_id for result correlation.
+        int id_counter = result.contains("tool_calls")
+            ? static_cast<int>(result["tool_calls"].size()) : 0;
         result["tool_calls"].push_back(
-            {{"type", "function"}, {"function", tool_call}});
+            {{"id", "call_" + std::to_string(id_counter)},
+             {"type", "function"},
+             {"function", tool_call}});
       }
     }
     text.clear();

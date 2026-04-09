@@ -150,13 +150,29 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
   absl::StatusOr<Message> ToMessage(
       const Responses& responses,
       const DataProcessorArguments& args) const final {
+    absl::StatusOr<Message> result;
     if (std::holds_alternative<ExpectedArgsT>(args)) {
-      return this->ToMessageImpl(responses, std::get<ExpectedArgsT>(args));
+      result = this->ToMessageImpl(responses, std::get<ExpectedArgsT>(args));
     } else if (std::holds_alternative<std::monostate>(args)) {
-      return this->ToMessageImpl(responses, ExpectedArgsT{});
+      result = this->ToMessageImpl(responses, ExpectedArgsT{});
+    } else {
+      return absl::InvalidArgumentError(
+          "DataProcessorArguments does not hold the expected type");
     }
-    return absl::InvalidArgumentError(
-        "DataProcessorArguments does not hold the expected type");
+    // A6: Inject finish_reason based on TaskState.
+    if (result.ok()) {
+      auto task_state = responses.GetTaskState();
+      if (task_state == TaskState::kDone) {
+        if (result->contains("tool_calls")) {
+          (*result)["finish_reason"] = "tool_calls";
+        } else {
+          (*result)["finish_reason"] = "stop";
+        }
+      } else if (task_state == TaskState::kMaxNumTokensReached) {
+        (*result)["finish_reason"] = "length";
+      }
+    }
+    return result;
   }
 
   // Returns the config of the model data processor.

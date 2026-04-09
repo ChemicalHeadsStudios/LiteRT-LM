@@ -97,7 +97,8 @@ void SendCompleteMessage(
     DataProcessorArguments processor_args, int cursor,
     absl::AnyInvocable<void(Message)>& complete_message_callback,
     const std::string& active_channel_name,
-    const std::vector<Channel>& channels) {
+    const std::vector<Channel>& channels,
+    TaskState task_state = TaskState::kDone) {
   // Send remaining un-flushed text at the end of generation.
   if (cursor < accumulated_response_text.size()) {
     if (!active_channel_name.empty()) {
@@ -110,8 +111,8 @@ void SendCompleteMessage(
     }
   }
 
-  // Wrap the accumulated response text in a `Responses` object.
-  Responses responses(TaskState::kProcessing,
+  // A6: Wrap with the real TaskState so ToMessage can set finish_reason.
+  Responses responses(task_state,
                       {std::string(accumulated_response_text)});
 
   // Extract channel content from the responses. Modifies responses in place.
@@ -265,7 +266,8 @@ absl::AnyInvocable<void(absl::StatusOr<Responses>)> CreateInternalCallback(
       SendCompleteMessage(user_callback, accumulated_response_text,
                           model_data_processor, processor_args, cursor,
                           complete_message_callback,
-                          inside_channel ? active_channel_name : "", channels);
+                          inside_channel ? active_channel_name : "", channels,
+                          responses->GetTaskState());
       cursor = accumulated_response_text.size();
       return;
     }
