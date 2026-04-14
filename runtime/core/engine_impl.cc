@@ -212,6 +212,8 @@ class EngineImpl : public Engine {
       return absl::FailedPreconditionError("Vision modality is not enabled.");
     }
     return vision_executor_->GetVisionExecutorProperties();
+  }
+
   absl::Status LoadLoRA(uint32_t lora_id,
                         const std::string& lora_path) override {
     auto* lora_manager = executor_->GetLoraManager();

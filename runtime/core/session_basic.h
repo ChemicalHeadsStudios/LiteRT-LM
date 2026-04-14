@@ -144,14 +144,6 @@ class SessionBasic : public Engine::Session {
 
   const Tokenizer& GetTokenizer() const override { return tokenizer_; }
 
-  absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
-      const override {
-    if (audio_executor_properties_.has_value()) {
-      return audio_executor_properties_.value();
-    }
-    return absl::FailedPreconditionError("Audio modality is not enabled.");
-  }
-
   absl::StatusOr<std::unique_ptr<TrainableParameterHandle>>
   GetTrainableParameters() override;
 

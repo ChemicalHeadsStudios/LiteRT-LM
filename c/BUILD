@@ -138,5 +138,6 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = ENGINE_COMMON_DEPS + [
         "//runtime/core:engine_impl",
+        "//runtime/engine:mezo",
     ],
 )
