@@ -27,12 +27,21 @@
 extern "C" {
 #endif
 
+typedef void (*LiteRtLmLogCallback)(int severity, const char* source_file,
+                                    int source_line, const char* message,
+                                    void* context);
+
 LITERT_LM_C_API_EXPORT
 void litert_lm_log(int severity, const char* file, int line, const char* format,
                    ...);
 
 LITERT_LM_C_API_EXPORT
 void litert_lm_set_min_log_level(int level);
+
+// Routes native logs through callback and disables the default stderr sink.
+// The callback may run from any LiteRT-LM thread. Pass NULL to restore stderr.
+LITERT_LM_C_API_EXPORT
+void litert_lm_set_log_callback(LiteRtLmLogCallback callback, void* context);
 
 #ifdef __cplusplus
 }

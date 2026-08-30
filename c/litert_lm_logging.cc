@@ -16,11 +16,75 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <string>
 
 #include "absl/base/log_severity.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/log/globals.h"  // from @com_google_absl
+#include "absl/log/log_entry.h"  // from @com_google_absl
+#include "absl/log/log_sink.h"  // from @com_google_absl
+#include "absl/log/log_sink_registry.h"  // from @com_google_absl
+#include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "litert/c/internal/litert_logging.h"  // from @litert
+
+namespace {
+
+class CallbackLogSink final : public absl::LogSink {
+ public:
+  void SetCallback(LiteRtLmLogCallback callback, void* context) {
+    absl::MutexLock lock(&mutex_);
+    callback_ = callback;
+    context_ = context;
+  }
+
+  void Send(const absl::LogEntry& entry) override {
+    LiteRtLmLogCallback callback;
+    void* context;
+    {
+      absl::MutexLock lock(&mutex_);
+      callback = callback_;
+      context = context_;
+    }
+
+    if (callback == nullptr) {
+      return;
+    }
+
+    const std::string source_file(entry.source_filename());
+    const std::string message(entry.text_message());
+    callback(static_cast<int>(entry.log_severity()), source_file.c_str(),
+             entry.source_line(), message.c_str(), context);
+  }
+
+ private:
+  absl::Mutex mutex_;
+  LiteRtLmLogCallback callback_ = nullptr;
+  void* context_ = nullptr;
+};
+
+CallbackLogSink& GetCallbackLogSink() {
+  static CallbackLogSink* sink = new CallbackLogSink();
+  return *sink;
+}
+
+absl::Mutex callback_registration_mutex;
+bool callback_registered = false;
+absl::LogSeverityAtLeast previous_stderr_threshold =
+    absl::LogSeverityAtLeast::kInfo;
+LiteRtLogSeverity previous_litert_threshold = LITERT_INFO;
+
+LiteRtLogSeverity ToLiteRtSeverity(int level) {
+  switch (level) {
+    case 0:
+      return LITERT_INFO;
+    case 1:
+      return LITERT_WARNING;
+    default:
+      return LITERT_ERROR;
+  }
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -36,9 +100,39 @@ void litert_lm_log(int severity, const char* file, int line, const char* format,
 }
 
 void litert_lm_set_min_log_level(int level) {
+  absl::MutexLock lock(&callback_registration_mutex);
   absl::SetMinLogLevel(static_cast<absl::LogSeverityAtLeast>(level));
   LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
-                             static_cast<LiteRtLogSeverity>(level));
+                             callback_registered ? LITERT_SILENT
+                                                 : ToLiteRtSeverity(level));
+}
+
+void litert_lm_set_log_callback(LiteRtLmLogCallback callback, void* context) {
+  absl::MutexLock lock(&callback_registration_mutex);
+  CallbackLogSink& sink = GetCallbackLogSink();
+
+  if (callback != nullptr) {
+    sink.SetCallback(callback, context);
+    if (!callback_registered) {
+      previous_stderr_threshold = absl::StderrThreshold();
+      LiteRtGetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                                 &previous_litert_threshold);
+      absl::AddLogSink(&sink);
+      callback_registered = true;
+    }
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
+    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(), LITERT_SILENT);
+    return;
+  }
+
+  if (callback_registered) {
+    absl::RemoveLogSink(&sink);
+    absl::SetStderrThreshold(previous_stderr_threshold);
+    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                               previous_litert_threshold);
+    callback_registered = false;
+  }
+  sink.SetCallback(nullptr, nullptr);
 }
 
 }  // extern "C"

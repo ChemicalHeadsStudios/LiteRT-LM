@@ -112,6 +112,24 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "litert_lm_logging_test",
+    srcs = [
+        "litert_lm_logging.cc",
+        "litert_lm_logging.h",
+        "litert_lm_logging_test.cc",
+    ],
+    deps = [
+        "@com_google_absl//absl/base:log_severity",
+        "@com_google_absl//absl/log:absl_log",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/log:log_sink_registry",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_googletest//:gtest_main",
+        "@litert//litert/c/internal:litert_logging",
+    ],
+)
+
 cc_binary(
     name = "litert_lm_capi",
     linkshared = True,
