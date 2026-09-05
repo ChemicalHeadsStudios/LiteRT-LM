@@ -27,14 +27,23 @@
 #include <variant>
 #include <vector>
 
+#include "absl/base/log_severity.h"  // from @com_google_absl
+#include "absl/base/no_destructor.h"  // from @com_google_absl
+#include "absl/base/thread_annotations.h"  // from @com_google_absl
 #include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
+#include "absl/log/globals.h"  // from @com_google_absl
+#include "absl/log/log_entry.h"  // from @com_google_absl
+#include "absl/log/log_sink.h"  // from @com_google_absl
+#include "absl/log/log_sink_registry.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
 #include "c/engine_internal.h"
+#include "litert/c/internal/litert_logging.h"  // from @litert
 #include "runtime/components/constrained_decoding/no_repeat_ngram_config.h"
 #include "runtime/components/constrained_decoding/repetition_penalty_config.h"
 #include "runtime/components/constrained_decoding/suppress_tokens_config.h"
@@ -52,6 +61,68 @@
 #include "support/tokenizer/tokenizer.h"
 
 namespace {
+
+LiteRtLmLogSeverity ToLiteRtLmLogSeverity(absl::LogSeverity severity) {
+  switch (severity) {
+    case absl::LogSeverity::kInfo:
+      return kLiteRtLmLogSeverityInfo;
+    case absl::LogSeverity::kWarning:
+      return kLiteRtLmLogSeverityWarning;
+    case absl::LogSeverity::kError:
+      return kLiteRtLmLogSeverityError;
+    case absl::LogSeverity::kFatal:
+      return kLiteRtLmLogSeverityFatal;
+  }
+  return kLiteRtLmLogSeverityInfo;
+}
+
+// Forwards absl log records to an embedder-supplied callback. Registered with
+// absl only while a callback is installed, so the default stderr path is
+// untouched for embedders that never call litert_lm_set_log_callback.
+class CallbackLogSink final : public absl::LogSink {
+ public:
+  void SetCallback(LiteRtLmLogCallback callback, void* context) {
+    absl::MutexLock lock(&mutex_);
+    callback_ = callback;
+    context_ = context;
+  }
+
+  void Send(const absl::LogEntry& entry) override {
+    LiteRtLmLogCallback callback;
+    void* context;
+    {
+      absl::MutexLock lock(&mutex_);
+      callback = callback_;
+      context = context_;
+    }
+    if (callback == nullptr) {
+      return;
+    }
+    // absl::string_view is not guaranteed to be NUL terminated, so copy before
+    // handing C strings to the callback.
+    const std::string source_file(entry.source_filename());
+    const std::string message(entry.text_message());
+    callback(ToLiteRtLmLogSeverity(entry.log_severity()), source_file.c_str(),
+             entry.source_line(), message.c_str(), context);
+  }
+
+ private:
+  absl::Mutex mutex_;
+  LiteRtLmLogCallback callback_ ABSL_GUARDED_BY(mutex_) = nullptr;
+  void* context_ ABSL_GUARDED_BY(mutex_) = nullptr;
+};
+
+CallbackLogSink& GetCallbackLogSink() {
+  static absl::NoDestructor<CallbackLogSink> sink;
+  return *sink;
+}
+
+absl::Mutex g_log_callback_mutex(absl::kConstInit);
+bool g_log_callback_registered ABSL_GUARDED_BY(g_log_callback_mutex) = false;
+absl::LogSeverityAtLeast g_saved_stderr_threshold
+    ABSL_GUARDED_BY(g_log_callback_mutex) = absl::LogSeverityAtLeast::kInfo;
+LiteRtLogSeverity g_saved_litert_severity
+    ABSL_GUARDED_BY(g_log_callback_mutex) = kLiteRtLogSeverityInfo;
 
 absl::AnyInvocable<void(absl::StatusOr<litert::lm::Responses>)> CreateCallback(
     LiteRtLmStreamCallback callback, void* callback_data) {
@@ -203,6 +274,46 @@ extern "C" {
 
 void litert_lm_set_min_log_level(LiteRtLmLogSeverity level) {
   litert::lm::SetMinLogSeverity(static_cast<litert::lm::LogSeverity>(level));
+  // SetMinLogSeverity reopens stderr and the LiteRT logger. Re-silence both if
+  // an embedder has taken over log delivery, or its callback would be
+  // shadowed by duplicate stderr output.
+  absl::MutexLock lock(&g_log_callback_mutex);
+  if (g_log_callback_registered) {
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
+    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                               kLiteRtLogSeveritySilent);
+  }
+}
+
+void litert_lm_set_log_callback(LiteRtLmLogCallback callback, void* context) {
+  absl::MutexLock lock(&g_log_callback_mutex);
+  CallbackLogSink& sink = GetCallbackLogSink();
+
+  if (callback != nullptr) {
+    sink.SetCallback(callback, context);
+    if (!g_log_callback_registered) {
+      g_saved_stderr_threshold = absl::StderrThreshold();
+      LiteRtGetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                                 &g_saved_litert_severity);
+      absl::AddLogSink(&sink);
+      g_log_callback_registered = true;
+    }
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
+    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                               kLiteRtLogSeveritySilent);
+    return;
+  }
+
+  if (g_log_callback_registered) {
+    absl::RemoveLogSink(&sink);
+    absl::SetStderrThreshold(g_saved_stderr_threshold);
+    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
+                               g_saved_litert_severity);
+    g_log_callback_registered = false;
+  }
+  // Clear the callback only after the sink is unregistered, so a record in
+  // flight on another thread never sees a stale pointer.
+  sink.SetCallback(nullptr, nullptr);
 }
 
 SamplerParameters::Type ToSamplerParametersType(LiteRtLmSamplerType type) {

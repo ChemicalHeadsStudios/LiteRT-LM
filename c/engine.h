@@ -464,6 +464,32 @@ typedef enum {
 LITERT_LM_C_API_EXPORT
 void litert_lm_set_min_log_level(LiteRtLmLogSeverity level);
 
+// Receives one log record from the LiteRT LM library.
+//
+// @param severity The severity of the record.
+// @param source_file The source file that emitted the record. Valid only for
+//   the duration of the call.
+// @param source_line The line in `source_file` that emitted the record.
+// @param message The formatted message text, without the severity or location
+//   prefix. Valid only for the duration of the call.
+// @param context The context pointer passed to `litert_lm_set_log_callback`.
+typedef void (*LiteRtLmLogCallback)(LiteRtLmLogSeverity severity,
+                                    const char* source_file, int source_line,
+                                    const char* message, void* context);
+
+// Routes log records to `callback` and silences the default stderr sink.
+//
+// An embedder with its own logging system needs the records in that system
+// rather than on a stderr stream it does not own. The callback may run on any
+// LiteRT LM thread, so it must be thread safe.
+//
+// @param callback The callback to receive records, or NULL to restore the
+//   stderr sink and the log levels that were in effect before the first call.
+// @param context An arbitrary pointer passed back to every callback
+//   invocation.
+LITERT_LM_C_API_EXPORT
+void litert_lm_set_log_callback(LiteRtLmLogCallback callback, void* context);
+
 // Represents the type of input data.
 //
 // Added in version 0.1.0.
