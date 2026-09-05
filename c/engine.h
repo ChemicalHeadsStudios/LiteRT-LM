@@ -825,6 +825,56 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_engine_settings_set_gpu_enable_metal_residency_set(
     LiteRtLmEngineSettings* settings, bool enable_metal_residency_set);
 
+// Sets the maximum Top-K value supported by sessions created from this engine.
+//
+// GPU backends allocate their sampler for this bound up front, so a session
+// asking for a larger Top-K than the engine was built with is rejected.
+//
+// @param settings The engine settings.
+// @param max_top_k The maximum Top-K value. Default: 64.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_gpu_max_top_k(
+    LiteRtLmEngineSettings* settings, int max_top_k);
+
+// Sets whether the GPU context runs at low priority.
+//
+// A low priority context yields to other work on the same device, which keeps
+// inference from starving an application that is also rendering.
+//
+// @param settings The engine settings.
+// @param low_priority Whether to request a low priority GPU context.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_gpu_low_priority(
+    LiteRtLmEngineSettings* settings, bool low_priority);
+
+// Sets a preferred GPU device name substring, matched case-insensitively.
+//
+// The first adapter whose device name contains the substring is chosen. If
+// NULL or empty, the adapter is picked by the runtime's own heuristics.
+//
+// @param settings The engine settings.
+// @param device_substr The device name substring, e.g. "NVIDIA".
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_preferred_gpu_device(
+    LiteRtLmEngineSettings* settings, const char* device_substr);
+
+// Sets the number of output candidates, which is the decode batch size.
+//
+// @param settings The engine settings.
+// @param num_candidates The number of output candidates. Default: 1.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_num_output_candidates(
+    LiteRtLmEngineSettings* settings, int num_candidates);
+
+// Sets whether source-quantized fully connected and convolution ops are
+// allowed. Enabling this trades output quality for speed.
+//
+// @param settings The engine settings.
+// @param allow Whether to allow source-quantized FC and conv ops.
+LITERT_LM_C_API_EXPORT
+void litert_lm_engine_settings_set_allow_quantized_ops(
+    LiteRtLmEngineSettings* settings, bool allow);
+
 // Creates a LiteRT LM Engine from the given settings. The caller is responsible
 // for destroying the engine using `litert_lm_engine_delete`.
 //

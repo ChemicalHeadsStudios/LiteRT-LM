@@ -801,6 +801,84 @@ void litert_lm_engine_settings_set_gpu_enable_metal_residency_set(
   }
 }
 
+void litert_lm_engine_settings_set_gpu_max_top_k(
+    LiteRtLmEngineSettings* settings, int max_top_k) {
+  if (settings && settings->settings) {
+    auto& main_settings = settings->settings->GetMutableMainExecutorSettings();
+    auto artisan_config =
+        main_settings.MutableBackendConfig<litert::lm::GpuArtisanConfig>();
+    if (artisan_config.ok()) {
+      litert::lm::GpuArtisanConfig config = *artisan_config;
+      config.max_top_k = max_top_k;
+      main_settings.SetBackendConfig(config);
+      return;
+    }
+    auto gpu_config =
+        main_settings.MutableBackendConfig<litert::lm::GpuConfig>();
+    if (gpu_config.ok()) {
+      litert::lm::GpuConfig config = *gpu_config;
+      config.max_top_k = max_top_k;
+      main_settings.SetBackendConfig(config);
+      return;
+    }
+    ABSL_LOG(WARNING) << "Failed to get a GPU config to set max top k: "
+                      << gpu_config.status();
+  }
+}
+
+void litert_lm_engine_settings_set_gpu_low_priority(
+    LiteRtLmEngineSettings* settings, bool low_priority) {
+  if (settings && settings->settings) {
+    auto advanced_settings =
+        settings->settings->GetMainExecutorSettings()
+            .GetAdvancedSettings()
+            .value_or(litert::lm::AdvancedSettings());
+    advanced_settings.gpu_context_low_priority = low_priority;
+    settings->settings->GetMutableMainExecutorSettings().SetAdvancedSettings(
+        advanced_settings);
+  }
+}
+
+void litert_lm_engine_settings_set_preferred_gpu_device(
+    LiteRtLmEngineSettings* settings, const char* device_substr) {
+  if (settings && settings->settings) {
+    auto advanced_settings =
+        settings->settings->GetMainExecutorSettings()
+            .GetAdvancedSettings()
+            .value_or(litert::lm::AdvancedSettings());
+    advanced_settings.preferred_device_substr =
+        device_substr ? device_substr : "";
+    settings->settings->GetMutableMainExecutorSettings().SetAdvancedSettings(
+        advanced_settings);
+  }
+}
+
+void litert_lm_engine_settings_set_num_output_candidates(
+    LiteRtLmEngineSettings* settings, int num_candidates) {
+  if (settings && settings->settings) {
+    auto advanced_settings =
+        settings->settings->GetMainExecutorSettings()
+            .GetAdvancedSettings()
+            .value_or(litert::lm::AdvancedSettings());
+    advanced_settings.num_output_candidates = num_candidates;
+    settings->settings->GetMutableMainExecutorSettings().SetAdvancedSettings(
+        advanced_settings);
+  }
+}
+
+void litert_lm_engine_settings_set_allow_quantized_ops(
+    LiteRtLmEngineSettings* settings, bool allow) {
+  if (settings && settings->settings) {
+    auto advanced_settings =
+        settings->settings->GetMainExecutorSettings()
+            .GetAdvancedSettings()
+            .value_or(litert::lm::AdvancedSettings());
+    advanced_settings.allow_src_quantized_fc_conv_ops = allow;
+    settings->settings->GetMutableMainExecutorSettings().SetAdvancedSettings(
+        advanced_settings);
+  }
+}
+
 LiteRtLmEngine* litert_lm_engine_create(
     const LiteRtLmEngineSettings* settings) {
   if (!settings || !settings->settings) {
