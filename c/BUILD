@@ -429,3 +429,38 @@ cc_binary(
         "//conditions:default": [],
     }),
 )
+
+# BadLads fork: single shared library exposing the whole C API surface
+# (engine + session + conversation) for runtime loading from Unreal.
+cc_binary(
+    name = "litert_lm_capi",
+    srcs = [
+        "conversation.cc",
+        "conversation.h",
+        "embedding_engine.cc",
+        "embedding_engine.h",
+        "engine.cc",
+        "engine.h",
+        "experimental.cc",
+        "experimental.h",
+        "model_info.cc",
+        "model_info.h",
+    ],
+    additional_linker_inputs = select({
+        "@platforms//os:windows": [
+            "@litert//litert/c:windows_exported_symbols.def",
+        ],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "@platforms//os:windows": [
+            "/DEF:$(location @litert//litert/c:windows_exported_symbols.def)",
+        ],
+        "//conditions:default": [],
+    }),
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = ENGINE_COMMON_DEPS + [
+        "//runtime/core:engine_impl",
+    ],
+)
