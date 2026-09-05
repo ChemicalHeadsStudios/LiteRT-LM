@@ -179,13 +179,27 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
   absl::StatusOr<Message> ToMessage(
       const Responses& responses,
       const DataProcessorArguments& args) const final {
+    absl::StatusOr<Message> result;
     if (std::holds_alternative<ExpectedArgsT>(args)) {
-      return this->ToMessageImpl(responses, std::get<ExpectedArgsT>(args));
+      result = this->ToMessageImpl(responses, std::get<ExpectedArgsT>(args));
     } else if (std::holds_alternative<std::monostate>(args)) {
-      return this->ToMessageImpl(responses, ExpectedArgsT{});
+      result = this->ToMessageImpl(responses, ExpectedArgsT{});
+    } else {
+      return absl::InvalidArgumentError(
+          "DataProcessorArguments does not hold the expected type");
     }
-    return absl::InvalidArgumentError(
-        "DataProcessorArguments does not hold the expected type");
+    // Report why generation stopped, using the same vocabulary as the OpenAI
+    // chat completion schema so callers can branch on it directly.
+    if (result.ok()) {
+      const TaskState task_state = responses.GetTaskState();
+      if (task_state == TaskState::kDone) {
+        (*result)["finish_reason"] =
+            result->contains("tool_calls") ? "tool_calls" : "stop";
+      } else if (task_state == TaskState::kMaxNumTokensReached) {
+        (*result)["finish_reason"] = "length";
+      }
+    }
+    return result;
   }
 
   // Returns the config of the model data processor.

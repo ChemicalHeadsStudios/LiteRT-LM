@@ -150,8 +150,16 @@ absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
         continue;
       }
       for (const auto& tool_call : *tool_calls) {
+        // Give every call an id so a caller can correlate the tool result it
+        // sends back with the call that asked for it.
+        const int id_counter =
+            result.contains("tool_calls")
+                ? static_cast<int>(result["tool_calls"].size())
+                : 0;
         result["tool_calls"].push_back(
-            {{"type", "function"}, {"function", tool_call}});
+            {{"id", "call_" + std::to_string(id_counter)},
+             {"type", "function"},
+             {"function", tool_call}});
       }
     }
     text.clear();
