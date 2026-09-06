@@ -11,3 +11,22 @@
      "wasm32-unknown-unknown",
      "wasm32-wasip1",
 
+
+--- rust/toolchain.bzl
++++ rust/toolchain.bzl
+@@ -47,7 +47,14 @@
+     ]
+     panic_files = []
+ 
+-    std_rlibs = [f for f in rust_std if f.basename.endswith(".rlib")]
++    # profiler_builtins is the LLVM profile runtime for instrument-coverage builds.
++    # Linking it whole-archive registers an atexit hook that writes an empty
++    # default.profraw next to every process that loads the library.
++    std_rlibs = [
++        f
++        for f in rust_std
++        if f.basename.endswith(".rlib") and not f.basename.startswith("libprofiler_builtins")
++    ]
+     if std_rlibs:
+         # test depends on std
+         # std depends on everything except test
