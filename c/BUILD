@@ -58,6 +58,7 @@ ENGINE_LITE_COMMON_DEPS = [
     "@com_google_absl//absl/synchronization",
     "@com_google_absl//absl/time",
     "@litert//litert/c/internal:litert_logging",
+    "@litert//tflite:minimal_logging",
     "//support/tokenizer",
     "//runtime/components/constrained_decoding:no_repeat_ngram_config",
     "//runtime/components/constrained_decoding:repetition_penalty_config",

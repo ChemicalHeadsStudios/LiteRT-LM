@@ -419,6 +419,12 @@ http_archive(
 
 http_archive(
     name = "litert",
+    # Bazel's native patcher rejects PATCH.litert's last hunk that GNU patch and
+    # git apply both accept, so use the system tool, as patch_cmds already needs
+    # a shell here.
+    patch_args = ["-p0"],
+    patch_tool = "patch",
+    patches = ["@//:PATCH.litert"],
     patch_cmds = [
         # Replace @//third_party with @litert//third_party in files under third_party/.
         "sed -i -e 's|\"@//third_party/|\"@litert//third_party/|g' third_party/*/*",

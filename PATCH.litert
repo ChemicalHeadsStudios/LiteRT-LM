@@ -1,0 +1,167 @@
+--- litert/c/internal/litert_logging.h
++++ litert/c/internal/litert_logging.h
+@@ -98,6 +98,15 @@
+ // Use the library provided sink logger instead of creating a new one.
+ LiteRtStatus LiteRtUseSinkLogger();
+ 
++// Creates a logger that hands each record passing its minimum severity to
++// `callback` as a formatted message, for hosts that carry runtime logging in
++// their own logging system. The host destroys it with LiteRtDestroyLogger once
++// it is no longer the default logger.
++typedef void (*LiteRtLogCallback)(LiteRtLogSeverity severity,
++                                  const char* message, void* user_data);
++LiteRtStatus LiteRtCreateCallbackLogger(LiteRtLogCallback callback,
++                                        void* user_data, LiteRtLogger* logger);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ 
+--- litert/c/internal/litert_logging.cc
++++ litert/c/internal/litert_logging.cc
+@@ -198,6 +198,40 @@
+   std::vector<std::string> logs_;
+ };
+ 
++class LiteRtCallbackLoggerT final : public LiteRtLoggerT {
++ public:
++  LiteRtCallbackLoggerT(LiteRtLogCallback callback, void* user_data)
++      : callback_(callback), user_data_(user_data) {}
++
++  LiteRtLogSeverity GetMinSeverity() override { return min_severity_; }
++
++  void SetMinSeverity(LiteRtLogSeverity severity) override {
++    min_severity_ = severity;
++  }
++
++  void Log(LiteRtLogSeverity severity, const char* format,
++           va_list args) override {
++    va_list args2;
++    va_copy(args2, args);
++    const int len = vsnprintf(nullptr, 0, format, args);
++    std::string message;
++    if (len > 0) {
++      message.resize(len + 1);
++      vsnprintf(message.data(), len + 1, format, args2);
++      message.resize(len);
++    }
++    va_end(args2);
++    callback_(severity, message.c_str(), user_data_);
++  }
++
++  const char* GetIdentifier() const override { return "LiteRtCallbackLogger"; }
++
++ private:
++  LiteRtLogCallback callback_;
++  void* user_data_;
++  LiteRtLogSeverity min_severity_ = kLiteRtLogSeverityInfo;
++};
++
+ const char* LiteRtGetLogSeverityName(LiteRtLogSeverity severity) {
+   switch (severity) {
+     case kLiteRtLogSeverityVerbose:
+@@ -232,6 +266,15 @@
+   return kLiteRtStatusOk;
+ }
+ 
++LiteRtStatus LiteRtCreateCallbackLogger(LiteRtLogCallback callback,
++                                        void* user_data, LiteRtLogger* logger) {
++  if (!callback || !logger) {
++    return kLiteRtStatusErrorInvalidArgument;
++  }
++  *logger = new LiteRtCallbackLoggerT(callback, user_data);
++  return kLiteRtStatusOk;
++}
++
+ LiteRtStatus LiteRtGetMinLoggerSeverity(LiteRtLogger logger,
+                                         LiteRtLogSeverity* min_severity) {
+   if (!logger || !min_severity) {
+--- tflite/minimal_logging.h
++++ tflite/minimal_logging.h
+@@ -45,9 +45,19 @@
+   // Set the minimum severity level for logging, returning the old severity.
+   static LogSeverity SetMinimumLogSeverity(LogSeverity new_severity);
+ 
++  // Receives every record that passes the minimum severity, as a formatted
++  // message, in place of the platform console.
++  typedef void (*LogSink)(LogSeverity severity, const char* message,
++                          void* user_data);
++
++  // Installs `sink` for the platform console path; NULL restores the console.
++  static void SetLogSink(LogSink sink, void* user_data);
++
+  private:
+   static const char* GetSeverityName(LogSeverity severity);
+   static LogSeverity minimum_log_severity_;
++  static LogSink log_sink_;
++  static void* log_sink_user_data_;
+ };
+ 
+ }  // namespace logging_internal
+--- tflite/minimal_logging.cc
++++ tflite/minimal_logging.cc
+@@ -55,5 +55,13 @@
+   return old_severity;
+ }
+ 
++MinimalLogger::LogSink MinimalLogger::log_sink_ = nullptr;
++void* MinimalLogger::log_sink_user_data_ = nullptr;
++
++void MinimalLogger::SetLogSink(LogSink sink, void* user_data) {
++  MinimalLogger::log_sink_ = sink;
++  MinimalLogger::log_sink_user_data_ = user_data;
++}
++
+ }  // namespace logging_internal
+ }  // namespace tflite
+--- tflite/minimal_logging_default.cc
++++ tflite/minimal_logging_default.cc
+@@ -16,6 +16,7 @@
+ #include <stdarg.h>
+ 
+ #include <cstdio>
++#include <string>
+ 
+ #include "tflite/minimal_logging.h"
+ 
+@@ -32,14 +33,37 @@
+ 
+ void MinimalLogger::LogFormatted(LogSeverity severity, const char* format,
+                                  va_list args) {
+-  if (severity >= MinimalLogger::minimum_log_severity_) {
+-    fprintf(stderr, "%s: ", GetSeverityName(severity));
++  if (severity < MinimalLogger::minimum_log_severity_) {
++    return;
++  }
++  if (MinimalLogger::log_sink_ != nullptr) {
++    // The sink takes a finished message, so format here.
++    va_list args_copy;
++    va_copy(args_copy, args);
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wformat-nonliteral"
++    const int len = vsnprintf(nullptr, 0, format, args_copy);
++#pragma clang diagnostic pop
++    va_end(args_copy);
++    std::string message;
++    if (len > 0) {
++      message.resize(len + 1);
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wformat-nonliteral"
+-    vfprintf(stderr, format, args);
++      vsnprintf(&message[0], len + 1, format, args);
+ #pragma clang diagnostic pop
+-    fputc('\n', stderr);
++      message.resize(len);
++    }
++    MinimalLogger::log_sink_(severity, message.c_str(),
++                             MinimalLogger::log_sink_user_data_);
++    return;
+   }
++  fprintf(stderr, "%s: ", GetSeverityName(severity));
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wformat-nonliteral"
++  vfprintf(stderr, format, args);
++#pragma clang diagnostic pop
++  fputc('\n', stderr);
+ }
+ 
+ }  // namespace logging_internal
