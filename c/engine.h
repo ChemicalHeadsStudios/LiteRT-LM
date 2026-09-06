@@ -467,8 +467,9 @@ void litert_lm_set_min_log_level(LiteRtLmLogSeverity level);
 // Receives one log record from the LiteRT LM library.
 //
 // @param severity The severity of the record.
-// @param source_file The source file that emitted the record. Valid only for
-//   the duration of the call.
+// @param source_file The source file that emitted the record, or an empty
+//   string for a LiteRT or TFLite runtime record, which carries its location
+//   inside `message`. Valid only for the duration of the call.
 // @param source_line The line in `source_file` that emitted the record.
 // @param message The formatted message text, without the severity or location
 //   prefix. Valid only for the duration of the call.
@@ -480,8 +481,9 @@ typedef void (*LiteRtLmLogCallback)(LiteRtLmLogSeverity severity,
 // Routes log records to `callback` and silences the default stderr sink.
 //
 // An embedder with its own logging system needs the records in that system
-// rather than on a stderr stream it does not own. The callback may run on any
-// LiteRT LM thread, so it must be thread safe.
+// rather than on a stderr stream it does not own. This covers the library's
+// own records and those of the LiteRT and TFLite runtimes underneath it. The
+// callback may run on any LiteRT LM thread, so it must be thread safe.
 //
 // @param callback The callback to receive records, or NULL to restore the
 //   stderr sink and the log levels that were in effect before the first call.

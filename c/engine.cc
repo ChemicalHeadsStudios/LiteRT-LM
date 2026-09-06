@@ -34,6 +34,7 @@
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/log/globals.h"  // from @com_google_absl
+#include "absl/log/initialize.h"  // from @com_google_absl
 #include "absl/log/log_entry.h"  // from @com_google_absl
 #include "absl/log/log_sink.h"  // from @com_google_absl
 #include "absl/log/log_sink_registry.h"  // from @com_google_absl
@@ -44,6 +45,8 @@
 #include "absl/time/time.h"  // from @com_google_absl
 #include "c/engine_internal.h"
 #include "litert/c/internal/litert_logging.h"  // from @litert
+#include "tflite/logger.h"  // from @litert
+#include "tflite/minimal_logging.h"  // from @litert
 #include "runtime/components/constrained_decoding/no_repeat_ngram_config.h"
 #include "runtime/components/constrained_decoding/repetition_penalty_config.h"
 #include "runtime/components/constrained_decoding/suppress_tokens_config.h"
@@ -76,9 +79,43 @@ LiteRtLmLogSeverity ToLiteRtLmLogSeverity(absl::LogSeverity severity) {
   return kLiteRtLmLogSeverityInfo;
 }
 
-// Forwards absl log records to an embedder-supplied callback. Registered with
-// absl only while a callback is installed, so the default stderr path is
-// untouched for embedders that never call litert_lm_set_log_callback.
+LiteRtLmLogSeverity ToLiteRtLmLogSeverity(LiteRtLogSeverity severity) {
+  switch (severity) {
+    case kLiteRtLogSeverityDebug:
+      return kLiteRtLmLogSeverityDebug;
+    case kLiteRtLogSeverityVerbose:
+      return kLiteRtLmLogSeverityVerbose;
+    case kLiteRtLogSeverityInfo:
+      return kLiteRtLmLogSeverityInfo;
+    case kLiteRtLogSeverityWarning:
+      return kLiteRtLmLogSeverityWarning;
+    case kLiteRtLogSeverityError:
+      return kLiteRtLmLogSeverityError;
+    default:
+      return kLiteRtLmLogSeverityInfo;
+  }
+}
+
+LiteRtLmLogSeverity ToLiteRtLmLogSeverity(tflite::LogSeverity severity) {
+  switch (severity) {
+    case tflite::TFLITE_LOG_VERBOSE:
+      return kLiteRtLmLogSeverityVerbose;
+    case tflite::TFLITE_LOG_INFO:
+      return kLiteRtLmLogSeverityInfo;
+    case tflite::TFLITE_LOG_WARNING:
+      return kLiteRtLmLogSeverityWarning;
+    case tflite::TFLITE_LOG_ERROR:
+      return kLiteRtLmLogSeverityError;
+    default:
+      return kLiteRtLmLogSeverityInfo;
+  }
+}
+
+// Forwards log records to an embedder-supplied callback: absl records through
+// the LogSink interface, LiteRT and TFLite runtime records through Forward.
+// Registered with absl only while a callback is installed, so the default
+// stderr path is untouched for embedders that never call
+// litert_lm_set_log_callback.
 class CallbackLogSink final : public absl::LogSink {
  public:
   void SetCallback(LiteRtLmLogCallback callback, void* context) {
@@ -87,7 +124,8 @@ class CallbackLogSink final : public absl::LogSink {
     context_ = context;
   }
 
-  void Send(const absl::LogEntry& entry) override {
+  void Forward(LiteRtLmLogSeverity severity, const char* source_file,
+               int source_line, const char* message) {
     LiteRtLmLogCallback callback;
     void* context;
     {
@@ -98,12 +136,16 @@ class CallbackLogSink final : public absl::LogSink {
     if (callback == nullptr) {
       return;
     }
+    callback(severity, source_file, source_line, message, context);
+  }
+
+  void Send(const absl::LogEntry& entry) override {
     // absl::string_view is not guaranteed to be NUL terminated, so copy before
     // handing C strings to the callback.
     const std::string source_file(entry.source_filename());
     const std::string message(entry.text_message());
-    callback(ToLiteRtLmLogSeverity(entry.log_severity()), source_file.c_str(),
-             entry.source_line(), message.c_str(), context);
+    Forward(ToLiteRtLmLogSeverity(entry.log_severity()), source_file.c_str(),
+            entry.source_line(), message.c_str());
   }
 
  private:
@@ -117,12 +159,28 @@ CallbackLogSink& GetCallbackLogSink() {
   return *sink;
 }
 
+// Runtime records carry their location, if any, inside the message text, so
+// they reach the callback with an empty source file.
+void ForwardLiteRtRecord(LiteRtLogSeverity severity, const char* message,
+                         void* /*user_data*/) {
+  GetCallbackLogSink().Forward(ToLiteRtLmLogSeverity(severity), "", 0,
+                               message);
+}
+
+void ForwardTfLiteRecord(tflite::LogSeverity severity, const char* message,
+                         void* /*user_data*/) {
+  GetCallbackLogSink().Forward(ToLiteRtLmLogSeverity(severity), "", 0,
+                               message);
+}
+
 absl::Mutex g_log_callback_mutex(absl::kConstInit);
 bool g_log_callback_registered ABSL_GUARDED_BY(g_log_callback_mutex) = false;
 absl::LogSeverityAtLeast g_saved_stderr_threshold
     ABSL_GUARDED_BY(g_log_callback_mutex) = absl::LogSeverityAtLeast::kInfo;
-LiteRtLogSeverity g_saved_litert_severity
-    ABSL_GUARDED_BY(g_log_callback_mutex) = kLiteRtLogSeverityInfo;
+LiteRtLogger g_litert_callback_logger ABSL_GUARDED_BY(g_log_callback_mutex) =
+    nullptr;
+LiteRtLogger g_saved_litert_logger ABSL_GUARDED_BY(g_log_callback_mutex) =
+    nullptr;
 
 absl::AnyInvocable<void(absl::StatusOr<litert::lm::Responses>)> CreateCallback(
     LiteRtLmStreamCallback callback, void* callback_data) {
@@ -274,44 +332,68 @@ extern "C" {
 
 void litert_lm_set_min_log_level(LiteRtLmLogSeverity level) {
   litert::lm::SetMinLogSeverity(static_cast<litert::lm::LogSeverity>(level));
-  // SetMinLogSeverity reopens stderr and the LiteRT logger. Re-silence both if
-  // an embedder has taken over log delivery, or its callback would be
-  // shadowed by duplicate stderr output.
+  // SetMinLogSeverity reopens stderr for absl. Re-silence it if an embedder
+  // has taken over log delivery, or its callback would be shadowed by
+  // duplicate stderr output. The LiteRT and TFLite loggers need nothing here:
+  // while a callback is installed they are the forwarding ones, and the new
+  // level simply becomes their filter.
   absl::MutexLock lock(&g_log_callback_mutex);
   if (g_log_callback_registered) {
     absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
-    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
-                               kLiteRtLogSeveritySilent);
   }
 }
 
 void litert_lm_set_log_callback(LiteRtLmLogCallback callback, void* context) {
   absl::MutexLock lock(&g_log_callback_mutex);
   CallbackLogSink& sink = GetCallbackLogSink();
-
   if (callback != nullptr) {
     sink.SetCallback(callback, context);
     if (!g_log_callback_registered) {
+      // Until absl logging is initialized every absl record also goes to
+      // stderr in absl's raw format, whatever the threshold says, and absl
+      // prints a notice about that. A host reaching for a callback has no
+      // other way to initialize the library's absl, so do it here once.
+      static bool absl_log_initialized = false;
+      if (!absl_log_initialized) {
+        absl::InitializeLog();
+        absl_log_initialized = true;
+      }
       g_saved_stderr_threshold = absl::StderrThreshold();
-      LiteRtGetMinLoggerSeverity(LiteRtGetDefaultLogger(),
-                                 &g_saved_litert_severity);
       absl::AddLogSink(&sink);
+      // Every new LiteRT environment resets the default logger's severity
+      // from its options, so silencing that logger does not hold. Make the
+      // default logger a forwarding one instead; environments then only
+      // adjust its filter. It is created once and kept, so a record in flight
+      // on another thread never reaches a freed logger after the callback is
+      // removed.
+      g_saved_litert_logger = LiteRtGetDefaultLogger();
+      if (g_litert_callback_logger == nullptr) {
+        LiteRtCreateCallbackLogger(&ForwardLiteRtRecord, nullptr,
+                                   &g_litert_callback_logger);
+      }
+      LiteRtLogSeverity severity = kLiteRtLogSeverityInfo;
+      LiteRtGetMinLoggerSeverity(g_saved_litert_logger, &severity);
+      LiteRtSetMinLoggerSeverity(g_litert_callback_logger, severity);
+      LiteRtSetDefaultLogger(g_litert_callback_logger);
+      tflite::logging_internal::MinimalLogger::SetLogSink(&ForwardTfLiteRecord,
+                                                          nullptr);
       g_log_callback_registered = true;
     }
     absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfinity);
-    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
-                               kLiteRtLogSeveritySilent);
     return;
   }
-
   if (g_log_callback_registered) {
     absl::RemoveLogSink(&sink);
     absl::SetStderrThreshold(g_saved_stderr_threshold);
-    LiteRtSetMinLoggerSeverity(LiteRtGetDefaultLogger(),
-                               g_saved_litert_severity);
+    tflite::logging_internal::MinimalLogger::SetLogSink(nullptr, nullptr);
+    // Carry the level chosen while forwarding back to the console logger.
+    LiteRtLogSeverity severity = kLiteRtLogSeverityInfo;
+    LiteRtGetMinLoggerSeverity(g_litert_callback_logger, &severity);
+    LiteRtSetMinLoggerSeverity(g_saved_litert_logger, severity);
+    LiteRtSetDefaultLogger(g_saved_litert_logger);
     g_log_callback_registered = false;
   }
-  // Clear the callback only after the sink is unregistered, so a record in
+  // Clear the callback only after the sinks are unregistered, so a record in
   // flight on another thread never sees a stale pointer.
   sink.SetCallback(nullptr, nullptr);
 }
