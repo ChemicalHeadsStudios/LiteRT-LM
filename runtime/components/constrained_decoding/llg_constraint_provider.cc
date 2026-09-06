@@ -33,7 +33,6 @@
 #include "runtime/components/constrained_decoding/constraint_provider_config.h"
 #include "runtime/components/constrained_decoding/llg_constraint.h"
 #include "runtime/components/constrained_decoding/llg_constraint_config.h"
-#include "runtime/components/tokenizer.h"
 #include "llguidance.h"
 
 namespace litert::lm {

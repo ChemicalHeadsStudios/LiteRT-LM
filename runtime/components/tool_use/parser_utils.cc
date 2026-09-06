@@ -88,7 +88,7 @@ SyntaxType GetSyntaxType(absl::string_view syntax_type) {
 absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
     absl::string_view response_str, absl::string_view code_fence_start,
     absl::string_view code_fence_end, SyntaxType syntax_type,
-    bool escape_fence_strings, absl::string_view tool_code_regex) {
+    const ParserOptions& options) {
   nlohmann::ordered_json result = nlohmann::json::object();
   // If the response is empty, return a content array with a single empty text
   // element to ensure the output format is consistent.
@@ -97,7 +97,7 @@ absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
     return result;
   }
   RE2 regex = TextAndToolCodeRegex(code_fence_start, code_fence_end,
-                                   escape_fence_strings);
+                                   options.escape_fence_strings);
   if (!regex.ok()) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Invalid regex: ", regex.pattern(), " error: ", regex.error()));
@@ -113,11 +113,11 @@ absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
     }
 
     // Before parsing the code block, apply tool_code_regex to each line.
-    if (!tool_code_regex.empty()) {
-      RE2 regex(tool_code_regex);
+    if (!options.tool_code_regex.empty()) {
+      RE2 regex(options.tool_code_regex);
       if (!regex.ok()) {
         return absl::InvalidArgumentError(
-            absl::StrCat("Invalid tool_code_regex: ", tool_code_regex));
+            absl::StrCat("Invalid tool_code_regex: ", options.tool_code_regex));
       }
       code_block = FilterLines(code_block, regex);
     }
@@ -136,15 +136,26 @@ absl::StatusOr<nlohmann::ordered_json> ParseTextAndToolCalls(
             "Unsupported syntax type: ", static_cast<int>(syntax_type)));
       }
       if (!tool_calls.ok()) {
-        return absl::InvalidArgumentError(absl::StrCat(
-            "Failed to parse tool calls from response: ", original_response_str,
-            "code block: ", code_block,
-            " with error: ", tool_calls.status().message()));
+        if (options.return_error_on_parse_failure) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "Failed to parse tool calls from code block: ", code_block,
+              "\nfull response: ", original_response_str,
+              "\nerror: ", tool_calls.status().message()));
+        }
+        result["content"].push_back(
+            {{"type", "text"},
+             {"text", code_block},
+             {"error", absl::StrCat("Failed to parse tool calls: ",
+                                    tool_calls.status().message())}});
+        continue;
       }
       for (const auto& tool_call : *tool_calls) {
-        // A7: Assign a unique tool_call_id for result correlation.
-        int id_counter = result.contains("tool_calls")
-            ? static_cast<int>(result["tool_calls"].size()) : 0;
+        // Give every call an id so a caller can correlate the tool result it
+        // sends back with the call that asked for it.
+        const int id_counter =
+            result.contains("tool_calls")
+                ? static_cast<int>(result["tool_calls"].size())
+                : 0;
         result["tool_calls"].push_back(
             {{"id", "call_" + std::to_string(id_counter)},
              {"type", "function"},

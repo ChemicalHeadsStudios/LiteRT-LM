@@ -38,12 +38,12 @@ ThreadPool::ThreadPool(const std::string& name_prefix, size_t max_num_threads,
     : name_prefix_(name_prefix),
       max_num_threads_(max_num_threads == 0 ? 1 : max_num_threads),
       thread_options_(std::move(thread_options)) {
-  ABSL_LOG(INFO) << "ThreadPool '" << name_prefix_ << "': Running up to "
-                 << max_num_threads_ << " threads.";
+  ABSL_VLOG(1) << "ThreadPool '" << name_prefix_ << "': Running up to "
+               << max_num_threads_ << " threads.";
 }
 
 ThreadPool::~ThreadPool() {
-  ABSL_LOG(INFO) << "ThreadPool '" << name_prefix_ << "': Shutting down...";
+  ABSL_VLOG(1) << "ThreadPool '" << name_prefix_ << "': Shutting down...";
 
   std::vector<std::unique_ptr<WorkerThread>> threads_to_join;
   {
@@ -54,15 +54,25 @@ ThreadPool::~ThreadPool() {
 
   for (auto& thread_ptr : threads_to_join) {
     // Wait for each worker thread to finish.
-    ABSL_CHECK_OK(thread_ptr->Join());
+    auto status = thread_ptr->Join();
+    if (!status.ok()) {
+      ABSL_LOG(ERROR) << "Failed to join worker thread: " << status;
+    }
   }
 
   {
     absl::MutexLock lock(mutex_);
-    ABSL_CHECK(threads_.empty());
-    ABSL_CHECK_EQ(num_active_tasks_, 0);
+    if (!threads_.empty()) {
+      ABSL_LOG(ERROR) << "ThreadPool '" << name_prefix_
+                      << "': threads_ is not empty during shutdown.";
+    }
+    if (num_active_tasks_ != 0) {
+      ABSL_LOG(ERROR) << "ThreadPool '" << name_prefix_
+                      << "': num_active_tasks_ is " << num_active_tasks_
+                      << " during shutdown.";
+    }
   }
-  ABSL_LOG(INFO) << "ThreadPool '" << name_prefix_ << "': Shutdown complete.";
+  ABSL_VLOG(1) << "ThreadPool '" << name_prefix_ << "': Shutdown complete.";
 }
 
 absl::Status ThreadPool::Schedule(absl::AnyInvocable<void() &&> callback) {
@@ -83,9 +93,9 @@ absl::Status ThreadPool::Schedule(absl::AnyInvocable<void() &&> callback) {
       auto thread = WorkerThread::Create(this, name_prefix_);
       if (thread.ok()) {
         threads_.push_back(std::move(*thread));
-        ABSL_LOG(INFO) << "ThreadPool '" << name_prefix_
-                       << "': Created a worker thread since all " << num_threads
-                       << " worker threads are (supposed to be) busy.";
+        ABSL_VLOG(1) << "ThreadPool '" << name_prefix_
+                     << "': Created a worker thread since all " << num_threads
+                     << " worker threads are (supposed to be) busy.";
       } else if (num_threads == 0) {
         ABSL_LOG(ERROR) << "ThreadPool '" << name_prefix_
                         << "': Failed to create the first worker thread: "
@@ -153,9 +163,13 @@ void ThreadPool::RunWorker() {
     mutex_.Await(absl::Condition(&is_task_available_or_stopped));
 
     if (tasks_.empty()) {
-      ABSL_CHECK(stopped_);
-      ABSL_LOG(INFO) << "ThreadPool '" << name_prefix_
-                     << "': Worker thread stopped.";
+      if (!stopped_) {
+        ABSL_LOG(ERROR) << "ThreadPool '" << name_prefix_
+                        << "': Theoretical invariant violation: Worker "
+                           "thread woke up with no tasks but not stopped.";
+      }
+      ABSL_VLOG(1) << "ThreadPool '" << name_prefix_
+                   << "': Worker thread stopped.";
       return;
     }
 

@@ -16,7 +16,9 @@
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_CONVERSATION_MODEL_DATA_PROCESSOR_GENERIC_DATA_PROCESSOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/log/absl_log.h"  // from @com_google_absl
@@ -28,7 +30,9 @@
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/generic_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/model_data_processor.h"
-#include "runtime/engine/io_types.h"
+#include "support/preprocessor/audio_preprocessor.h"
+#include "support/preprocessor/image_preprocessor.h"
+#include "support/util/io_types.h"
 
 namespace litert::lm {
 
@@ -55,6 +59,14 @@ class GenericDataProcessor
   absl::StatusOr<nlohmann::ordered_json> MessageToTemplateInput(
       const nlohmann::ordered_json& message) const override;
 
+  // Renders a single turn template for the given message and history. Only the
+  // prompt template supporting single turn is valid for this method.
+  absl::StatusOr<SingleTurnTemplateRenderResult> RenderSingleTurnTemplate(
+      std::vector<Message>& history, const Preface& preface,
+      const Message& message, const PromptTemplate& prompt_template,
+      bool current_is_appending_message, bool append_message,
+      std::optional<nlohmann::ordered_json> extra_context) const override;
+
   // No-op for generic models.
   absl::string_view CodeFenceStart() const override { return ""; }
 
@@ -67,9 +79,15 @@ class GenericDataProcessor
   }
 
  private:
-  explicit GenericDataProcessor(GenericDataProcessorConfig config,
-                                const PromptTemplateCapabilities& capabilities)
-      : config_(config), capabilities_(capabilities) {};
+  explicit GenericDataProcessor(
+      GenericDataProcessorConfig config,
+      const PromptTemplateCapabilities& capabilities,
+      std::unique_ptr<ImagePreprocessor> image_preprocessor = nullptr,
+      std::unique_ptr<AudioPreprocessor> audio_preprocessor = nullptr)
+      : config_(config),
+        capabilities_(capabilities),
+        image_preprocessor_(std::move(image_preprocessor)),
+        audio_preprocessor_(std::move(audio_preprocessor)) {};
 
   absl::StatusOr<std::vector<InputData>> ToInputDataVectorImpl(
       const std::string& rendered_template_prompt,
@@ -83,13 +101,12 @@ class GenericDataProcessor
   absl::Status CloneStateImpl(
       const TypeSafeModelDataProcessor<GenericDataProcessorConfig,
                                        GenericDataProcessorArguments>& other)
-      override {
-    ABSL_LOG(INFO) << "GenericDataProcessor::CloneStateImpl is a no-op.";
-    return absl::OkStatus();
-  }
+      override;
 
   GenericDataProcessorConfig config_;
   PromptTemplateCapabilities capabilities_;
+  std::unique_ptr<ImagePreprocessor> image_preprocessor_;
+  std::unique_ptr<AudioPreprocessor> audio_preprocessor_;
 };
 
 }  // namespace litert::lm

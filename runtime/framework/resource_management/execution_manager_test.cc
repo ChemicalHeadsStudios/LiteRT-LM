@@ -25,30 +25,44 @@
 #include <gtest/gtest.h>
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "absl/synchronization/mutex.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
+#include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/constrained_decoding/fake_constraint.h"
+#include "runtime/components/constrained_decoding/no_repeat_ngram_config.h"
+#include "runtime/components/constrained_decoding/repetition_penalty_config.h"
+#include "runtime/components/constrained_decoding/suppress_tokens_config.h"
 #include "runtime/components/model_resources.h"
-#include "runtime/components/tokenizer.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
-#include "runtime/executor/audio_executor.h"
-#include "runtime/executor/audio_executor_settings.h"
+#include "runtime/executor/audio/audio_executor.h"
+#include "runtime/executor/audio/audio_executor_settings.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/fake_llm_executor.h"
 #include "runtime/executor/llm_executor_io_types.h"
+#include "runtime/framework/resource_management/serial_execution_manager.h"
+#include "runtime/framework/resource_management/threaded_execution_manager.h"
 #include "runtime/proto/token.pb.h"
 #include "runtime/util/status_macros.h"  // IWYU pragma: keep
 #include "runtime/util/test_utils.h"  // NOLINT
+#include "support/tokenizer/tokenizer.h"
 
 namespace litert::lm {
+
+using Tokenizer = ::litert::support::Tokenizer;
+using TokenizerType = ::litert::support::TokenizerType;
+
 namespace {
 
 using ::testing::ElementsAre;
 using ::testing::Return;
+
+constexpr int kVocabSize = 10;
 
 class MockTokenizer : public Tokenizer {
  public:
@@ -57,9 +71,11 @@ class MockTokenizer : public Tokenizer {
   MOCK_METHOD(absl::StatusOr<int>, TokenToId, (absl::string_view token),
               (override));
   MOCK_METHOD(absl::StatusOr<std::string>, TokenIdsToText,
-              (const std::vector<int>& token_ids), (override));
+              (absl::Span<const int> token_ids, bool skip_special_tokens),
+              (override));
   MOCK_METHOD(TokenizerType, GetTokenizerType, (), (const, override));
   MOCK_METHOD(std::vector<std::string>, GetTokens, (), (const, override));
+  MOCK_METHOD(int, GetVocabSize, (), (const, override));
 };
 
 class FakeAudioExecutor : public AudioExecutor {
@@ -70,26 +86,34 @@ class FakeAudioExecutor : public AudioExecutor {
   }
 };
 
-class ExecutionManagerTest : public ::testing::Test {
+enum class ExecutionManagerType {
+  kThreaded,
+  kSerial,
+};
+
+class ExecutionManagerTest
+    : public ::testing::TestWithParam<ExecutionManagerType> {
  protected:
   void SetUp() override {
     tokenizer_ = std::make_unique<MockTokenizer>();
-    EXPECT_CALL(*tokenizer_, TokenIdsToText(ElementsAre(0)))
-        .WillRepeatedly(Return("0"));
-    EXPECT_CALL(*tokenizer_, TokenIdsToText(ElementsAre(4)))
-        .WillRepeatedly(Return("4"));
-    EXPECT_CALL(*tokenizer_, TokenIdsToText(ElementsAre(5)))
-        .WillRepeatedly(Return("5"));
-    EXPECT_CALL(*tokenizer_, TokenIdsToText(ElementsAre(6)))
-        .WillRepeatedly(Return("6"));
+    EXPECT_CALL(*tokenizer_, TokenIdsToText(testing::_, false))
+        .WillRepeatedly(
+            [](absl::Span<const int> ids, bool skip_special_tokens) {
+              std::string result;
+              for (int id : ids) {
+                result += std::to_string(id);
+              }
+              return result;
+            });
+    EXPECT_CALL(*tokenizer_, GetVocabSize()).WillRepeatedly(Return(kVocabSize));
   }
 
   absl::StatusOr<SessionConfig> CreateDefaultSessionConfig(
       bool use_external_sampler = false) {
-    ASSIGN_OR_RETURN(auto model_assets,
-                     ModelAssets::Create("test_model_path_1"));
-    ASSIGN_OR_RETURN(auto settings,
-                     EngineSettings::CreateDefault(model_assets));
+    ABSL_ASSIGN_OR_RETURN(auto model_assets,
+                          ModelAssets::Create("test_model_path_1"));
+    ABSL_ASSIGN_OR_RETURN(auto settings,
+                          EngineSettings::CreateDefault(model_assets));
 
     proto::LlmMetadata llm_metadata;
     llm_metadata.mutable_stop_tokens()
@@ -117,15 +141,27 @@ class ExecutionManagerTest : public ::testing::Test {
       std::unique_ptr<AudioExecutor> audio_executor = nullptr) {
     // The objects are moved to execution_manager_ so we can't access them
     // after creation.
-    ASSERT_OK_AND_ASSIGN(
-        execution_manager_,
-        ExecutionManager::Create(
-            /*tokenizer=*/tokenizer_.get(),
-            /*model_resources=*/model_resources_.get(),
-            /*llm_executor=*/std::move(fake_llm_executor),
-            /*vision_executor_settings=*/nullptr,
-            std::move(audio_executor_settings),
-            /*litert_env=*/nullptr, std::move(audio_executor)));
+    if (GetParam() == ExecutionManagerType::kThreaded) {
+      ASSERT_OK_AND_ASSIGN(
+          execution_manager_,
+          ThreadedExecutionManager::Create(
+              /*tokenizer=*/tokenizer_.get(),
+              /*model_resources=*/model_resources_.get(),
+              /*llm_executor=*/std::move(fake_llm_executor),
+              /*vision_executor_settings=*/nullptr,
+              std::move(audio_executor_settings),
+              /*litert_env=*/nullptr, std::move(audio_executor)));
+    } else {
+      ASSERT_OK_AND_ASSIGN(
+          execution_manager_,
+          SerialExecutionManager::Create(
+              /*tokenizer=*/tokenizer_.get(),
+              /*model_resources=*/model_resources_.get(),
+              /*llm_executor=*/std::move(fake_llm_executor),
+              /*vision_executor_settings=*/nullptr,
+              std::move(audio_executor_settings),
+              /*litert_env=*/nullptr, std::move(audio_executor)));
+    }
   }
 
   std::unique_ptr<FakeLlmExecutor> CreateDefaultFakeLlmExecutor(
@@ -137,7 +173,7 @@ class ExecutionManagerTest : public ::testing::Test {
     }
     auto decode_tokens = std::vector<std::vector<int>>{{4}, {5}, {6}};
     return std::make_unique<FakeLlmExecutor>(
-        /*vocab_size=*/10,
+        kVocabSize,
         /*prefill_tokens=*/std::move(prefill_tokens),
         /*decode_tokens=*/std::move(decode_tokens));
   }
@@ -149,7 +185,7 @@ class ExecutionManagerTest : public ::testing::Test {
   std::unique_ptr<ExecutionManager> execution_manager_;
 };
 
-TEST_F(ExecutionManagerTest, CanGetMutableBenchmarkInfo) {
+TEST_P(ExecutionManagerTest, CanGetMutableBenchmarkInfo) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -161,7 +197,7 @@ TEST_F(ExecutionManagerTest, CanGetMutableBenchmarkInfo) {
   EXPECT_NE(benchmark_info, nullptr);
 }
 
-TEST_F(ExecutionManagerTest, GetMutableBenchmarkInfoFailsIfNoBenchmarkInfo) {
+TEST_P(ExecutionManagerTest, GetMutableBenchmarkInfoFailsIfNoBenchmarkInfo) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -170,7 +206,7 @@ TEST_F(ExecutionManagerTest, GetMutableBenchmarkInfoFailsIfNoBenchmarkInfo) {
               testing::status::StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
-TEST_F(ExecutionManagerTest, AddPrefillTask) {
+TEST_P(ExecutionManagerTest, AddPrefillTask) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor({{{1, 2, 3, -4}}}));
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -198,12 +234,20 @@ TEST_F(ExecutionManagerTest, AddPrefillTask) {
 
   EXPECT_OK(execution_manager_->WaitUntilDone(task_id, absl::Seconds(3)));
 
-  EXPECT_THAT(task_states,
-              ElementsAre(TaskState::kCreated, TaskState::kQueued,
-                          TaskState::kProcessing, TaskState::kDone));
+  if (GetParam() == ExecutionManagerType::kThreaded) {
+    EXPECT_THAT(task_states,
+                ElementsAre(TaskState::kCreated, TaskState::kQueued,
+                            TaskState::kProcessing, TaskState::kDone));
+  } else {
+    // Serial execution might skip some states or report them differently.
+    // In our implementation, callback is called multiple times.
+    EXPECT_THAT(task_states,
+                ElementsAre(TaskState::kCreated, TaskState::kQueued,
+                            TaskState::kProcessing, TaskState::kDone));
+  }
 }
 
-TEST_F(ExecutionManagerTest, AddPrefillTaskWithAudioModality) {
+TEST_P(ExecutionManagerTest, AddPrefillTaskWithAudioModality) {
   auto fake_llm_executor = CreateDefaultFakeLlmExecutor();
 
   ASSERT_OK_AND_ASSIGN(auto* settings,
@@ -243,7 +287,7 @@ TEST_F(ExecutionManagerTest, AddPrefillTaskWithAudioModality) {
   EXPECT_OK(execution_manager_->WaitUntilDone(task_id, absl::Seconds(3)));
 }
 
-TEST_F(ExecutionManagerTest, AddPrefillTaskInvalidAudioInput) {
+TEST_P(ExecutionManagerTest, AddPrefillTaskInvalidAudioInput) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -285,7 +329,7 @@ TEST_F(ExecutionManagerTest, AddPrefillTaskInvalidAudioInput) {
                           TaskState::kProcessing, TaskState::kFailed));
 }
 
-TEST_F(ExecutionManagerTest, AddPrefillTaskInvalidImageInput) {
+TEST_P(ExecutionManagerTest, AddPrefillTaskInvalidImageInput) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -328,7 +372,7 @@ TEST_F(ExecutionManagerTest, AddPrefillTaskInvalidImageInput) {
                           TaskState::kProcessing, TaskState::kFailed));
 }
 
-TEST_F(ExecutionManagerTest, AddDecodeTaskWithInternalSampler) {
+TEST_P(ExecutionManagerTest, AddDecodeTaskWithInternalSampler) {
   // The default execution manager is using the internal sampler.
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
 
@@ -366,7 +410,8 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithInternalSampler) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, decode_task_id,
-      /*dependency_task_ids=*/{},
+      /*dependency_task_ids=*/{}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       std::move(callback)));
@@ -382,12 +427,12 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithInternalSampler) {
   EXPECT_THAT(responses_texts, ElementsAre("4", "5"));
 }
 
-TEST_F(ExecutionManagerTest, AddDecodeTaskWithExternalSampler) {
+TEST_P(ExecutionManagerTest, AddDecodeTaskWithExternalSampler) {
   std::vector<std::vector<int>> prefill_tokens = {{1, 2, 3}, {6}};
   std::vector<std::vector<int>> decode_tokens = {{4}, {5}, {6}};
 
   CreateExecutionManager(std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens)));
 
@@ -426,7 +471,8 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithExternalSampler) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, decode_task_id,
-      /*dependency_task_ids=*/{},
+      /*dependency_task_ids=*/{}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       std::move(callback)));
@@ -442,7 +488,7 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithExternalSampler) {
   EXPECT_THAT(responses_texts, ElementsAre("4", "5"));
 }
 
-TEST_F(ExecutionManagerTest, CreateAndRunDependentTasks) {
+TEST_P(ExecutionManagerTest, CreateAndRunDependentTasks) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
 
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
@@ -466,7 +512,8 @@ TEST_F(ExecutionManagerTest, CreateAndRunDependentTasks) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_b_id,
-      /*dependency_task_ids=*/{task_a_id},
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       /*callback=*/nullptr));
@@ -475,7 +522,7 @@ TEST_F(ExecutionManagerTest, CreateAndRunDependentTasks) {
   EXPECT_OK(execution_manager_->WaitUntilDone(task_a_id, absl::Seconds(1)));
 }
 
-TEST_F(ExecutionManagerTest, CreateTaskWithInvalidDependency) {
+TEST_P(ExecutionManagerTest, CreateTaskWithInvalidDependency) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
 
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
@@ -496,7 +543,7 @@ TEST_F(ExecutionManagerTest, CreateTaskWithInvalidDependency) {
   EXPECT_EQ(add_task_status.code(), absl::StatusCode::kInvalidArgument);
 }
 
-TEST_F(ExecutionManagerTest, CreateTaskWithInvalidDependencyId) {
+TEST_P(ExecutionManagerTest, CreateTaskWithInvalidDependencyId) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
 
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
@@ -532,17 +579,24 @@ TEST_F(ExecutionManagerTest, CreateTaskWithInvalidDependencyId) {
   EXPECT_FALSE(task_status.ok());
   EXPECT_EQ(task_status.code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(task_status.message(),
-              testing::HasSubstr("Dependency task 99999 not found"));
+              testing::HasSubstr("Dependency task 99999 is invalid."));
 }
 
-TEST_F(ExecutionManagerTest, WaitUntilTaskDoneTimeout) {
+TEST_P(ExecutionManagerTest, WaitUntilTaskDoneTimeout) {
+  if (GetParam() == ExecutionManagerType::kSerial) {
+    // Serial execution is synchronous, so it won't timeout unless the task
+    // itself takes longer than the timeout and we have some way to interrupt.
+    // But currently AddDecodeTask will block until done.
+    // So this test is only meaningful for Threaded.
+    GTEST_SKIP() << "Skipping timeout test for SerialExecutionManager";
+  }
   auto prefill_tokens = std::vector<std::vector<int>>{};
   auto decode_tokens = std::vector<std::vector<int>>{};
   decode_tokens.push_back({4});
   decode_tokens.push_back({5});
   decode_tokens.push_back({6});
   auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens));
 
@@ -560,8 +614,8 @@ TEST_F(ExecutionManagerTest, WaitUntilTaskDoneTimeout) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_id,
-      /*dependency_task_ids=*/{},
-
+      /*dependency_task_ids=*/{}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       /*callback=*/nullptr));
@@ -575,14 +629,17 @@ TEST_F(ExecutionManagerTest, WaitUntilTaskDoneTimeout) {
   EXPECT_OK(execution_manager_->WaitUntilDone(task_id, absl::Seconds(3)));
 }
 
-TEST_F(ExecutionManagerTest, WaitUntilAllDoneTimeout) {
+TEST_P(ExecutionManagerTest, WaitUntilAllDoneTimeout) {
+  if (GetParam() == ExecutionManagerType::kSerial) {
+    GTEST_SKIP() << "Skipping timeout test for SerialExecutionManager";
+  }
   auto prefill_tokens = std::vector<std::vector<int>>{};
   auto decode_tokens = std::vector<std::vector<int>>{};
   decode_tokens.push_back({4});
   decode_tokens.push_back({5});
   decode_tokens.push_back({6});
   auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens));
 
@@ -600,7 +657,8 @@ TEST_F(ExecutionManagerTest, WaitUntilAllDoneTimeout) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_id,
-      /*dependency_task_ids=*/{},
+      /*dependency_task_ids=*/{}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       /*callback=*/nullptr));
@@ -613,12 +671,12 @@ TEST_F(ExecutionManagerTest, WaitUntilAllDoneTimeout) {
   EXPECT_OK(execution_manager_->WaitUntilDone(task_id, absl::Seconds(3)));
 }
 
-TEST_F(ExecutionManagerTest, TaskReturnsError) {
+TEST_P(ExecutionManagerTest, TaskReturnsError) {
   auto prefill_tokens = std::vector<std::vector<int>>{};
   auto decode_tokens = std::vector<std::vector<int>>{};
   prefill_tokens.push_back({1, 2, 3});
   auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens));
 
@@ -651,7 +709,7 @@ TEST_F(ExecutionManagerTest, TaskReturnsError) {
   EXPECT_EQ(final_status, absl::InternalError("Executor failed"));
 }
 
-TEST_F(ExecutionManagerTest, CreateDependentTaskOnFailedTask) {
+TEST_P(ExecutionManagerTest, CreateDependentTaskOnFailedTask) {
   auto prefill_tokens = std::vector<std::vector<int>>{};
   auto decode_tokens = std::vector<std::vector<int>>{};
   prefill_tokens.push_back({1, 2, 3});
@@ -659,7 +717,7 @@ TEST_F(ExecutionManagerTest, CreateDependentTaskOnFailedTask) {
   decode_tokens.push_back({5});
   decode_tokens.push_back({6});
   auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens));
 
@@ -696,7 +754,8 @@ TEST_F(ExecutionManagerTest, CreateDependentTaskOnFailedTask) {
                        execution_manager_->GetNewTaskId());
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_b_id,
-      /*dependency_task_ids=*/{task_a_id},
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
       /*constraint=*/nullptr,
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       [&](absl::StatusOr<Responses> responses) {
@@ -711,7 +770,380 @@ TEST_F(ExecutionManagerTest, CreateDependentTaskOnFailedTask) {
   EXPECT_THAT(task_b_states, ElementsAre(TaskState::kDependentTaskFailed));
 }
 
-TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithInternalSampler) {
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithRepetitionPenaltyConfigWithInternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {0}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {5}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  // Set repetition penalty config to penalize the token "5" so that the
+  // output is end token "6".
+  RepetitionPenaltyConfig repetition_penalty_config(/*repetition_penalty=*/2.0f,
+                                                    /*presence_penalty=*/5.0f,
+                                                    /*frequency_penalty=*/1.0f,
+                                                    /*window_size=*/5);
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, repetition_penalty_config,
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "5"));
+}
+
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithRepetitionPenaltyConfigWithExternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {6}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {5}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig(
+                                                /*use_external_sampler=*/true));
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  // Set repetition penalty config to penalize the token "5" so that the
+  // output is end token "6".
+  RepetitionPenaltyConfig repetition_penalty_config(/*repetition_penalty=*/2.0f,
+                                                    /*presence_penalty=*/5.0f,
+                                                    /*frequency_penalty=*/1.0f,
+                                                    /*window_size=*/5);
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, repetition_penalty_config,
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "5"));
+}
+
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithNoRepeatNgramConfigWithInternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {0}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {5}, {4}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  // Set no repeat ngram config to ban the repetition of bigrams (i.e. "4, 5"
+  // and "5, 4").
+  NoRepeatNgramConfig config(/*no_repeat_ngram_size=*/2, /*window_size=*/5);
+
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      config, SuppressTokensConfig::Default(),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "5", "4"));
+}
+
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithNoRepeatNgramConfigWithExternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {6}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {5}, {4}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig(
+                                                /*use_external_sampler=*/true));
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  // Set no repeat ngram config to ban the repetition of bigrams (i.e. "4, 5"
+  // and "5, 4").
+  NoRepeatNgramConfig config(/*no_repeat_ngram_size=*/2, /*window_size=*/5);
+
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      config, SuppressTokensConfig::Default(),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "5", "4"));
+}
+
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithSuppressTokensConfigWithInternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {0}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {4}, {5}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  // Suppress token "5".
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(),
+      SuppressTokensConfig(/*suppress_tokens=*/{
+          5,
+      }),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "4"));
+}
+
+TEST_P(ExecutionManagerTest,
+       AddDecodeTaskWithSuppressTokensConfigWithExternalSampler) {
+  std::vector<std::vector<int>> prefill_tokens = {{1}, {6}};
+  std::vector<std::vector<int>> decode_tokens = {{4}, {4}, {5}, {5}, {6}};
+
+  auto fake_llm_executor = std::make_unique<FakeLlmExecutor>(
+      kVocabSize,
+      /*prefill_tokens=*/std::move(prefill_tokens),
+      /*decode_tokens=*/std::move(decode_tokens));
+  fake_llm_executor->SetDecodeLogitsOptions(
+      FakeLlmExecutor::DecodeLogitsOptions{.match_value = 10.0f,
+                                           .mismatch_value = -10.0f,
+                                           .end_token_id = 6,
+                                           .mismatch_end_token_value = 0.0f});
+
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig(
+                                                /*use_external_sampler=*/true));
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_a_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_a_id, std::move(inputs),
+      /*dependency_task_ids=*/{},
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      /*callback=*/nullptr));
+
+  std::vector<std::string> response_texts;
+  absl::AnyInvocable<void(absl::StatusOr<Responses>)> callback =
+      [&response_texts](absl::StatusOr<Responses> responses) {
+        ASSERT_OK(responses);
+        if (!responses->GetTexts().empty()) {
+          response_texts.push_back(responses->GetTexts()[0]);
+        }
+      };
+
+  // Suppress token "5".
+  ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_b_id,
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(),
+      SuppressTokensConfig(/*suppress_tokens=*/{
+          5,
+      }),
+      /*constraint=*/nullptr,
+      /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
+      std::move(callback)));
+
+  EXPECT_OK(execution_manager_->WaitUntilDone(task_b_id, absl::Seconds(3)));
+
+  EXPECT_THAT(response_texts, ElementsAre("4", "4"));
+}
+
+TEST_P(ExecutionManagerTest, AddDecodeTaskWithConstraintWithInternalSampler) {
   // The default execution manager is using the internal sampler.
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
 
@@ -734,9 +1166,9 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithInternalSampler) {
 
   ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
                        execution_manager_->GetNewTaskId());
-  // Fake constraint that expects "45".
+  // Fake constraint that expects "4".
   std::vector<int> expected_token_ids = {4, 0};
-  auto constraint = FakeConstraint(expected_token_ids, /*vocabulary_size=*/10);
+  auto constraint = FakeConstraint(expected_token_ids, kVocabSize);
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
   std::vector<std::string> response_texts;
@@ -750,7 +1182,9 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithInternalSampler) {
 
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_b_id,
-      /*dependency_task_ids=*/{task_a_id}, decode_config.GetConstraint(),
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
+      decode_config.GetConstraint(),
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       std::move(callback)));
 
@@ -759,7 +1193,7 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithInternalSampler) {
   EXPECT_THAT(response_texts, ElementsAre("4"));
 }
 
-TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
+TEST_P(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
   auto prefill_tokens = std::vector<std::vector<int>>{};
   auto decode_tokens = std::vector<std::vector<int>>{};
   prefill_tokens.push_back({1, 2, 3});
@@ -769,7 +1203,7 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
   decode_tokens.push_back({6});
 
   CreateExecutionManager(std::make_unique<FakeLlmExecutor>(
-      /*vocab_size=*/10,
+      kVocabSize,
       /*prefill_tokens=*/std::move(prefill_tokens),
       /*decode_tokens=*/std::move(decode_tokens)));
 
@@ -793,9 +1227,9 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
 
   ASSERT_OK_AND_ASSIGN(const TaskId task_b_id,
                        execution_manager_->GetNewTaskId());
-  // Fake constraint that expects "45".
+  // Fake constraint that expects "4".
   std::vector<int> expected_token_ids = {4, 0};
-  auto constraint = FakeConstraint(expected_token_ids, /*vocabulary_size=*/10);
+  auto constraint = FakeConstraint(expected_token_ids, kVocabSize);
   auto decode_config = DecodeConfig::CreateDefault();
   decode_config.SetConstraint(&constraint);
   std::vector<std::string> response_texts;
@@ -809,7 +1243,9 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
 
   ASSERT_OK(execution_manager_->AddDecodeTask(
       session_id, task_b_id,
-      /*dependency_task_ids=*/{task_a_id}, decode_config.GetConstraint(),
+      /*dependency_task_ids=*/{task_a_id}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
+      decode_config.GetConstraint(),
       /*cancelled=*/std::make_shared<std::atomic<bool>>(false),
       std::move(callback)));
 
@@ -818,7 +1254,7 @@ TEST_F(ExecutionManagerTest, AddDecodeTaskWithConstraintWithExternalSampler) {
   EXPECT_THAT(response_texts, ElementsAre("4"));
 }
 
-TEST_F(ExecutionManagerTest, AddTextScoringTask) {
+TEST_P(ExecutionManagerTest, AddTextScoringTask) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -879,7 +1315,7 @@ TEST_F(ExecutionManagerTest, AddTextScoringTask) {
   EXPECT_FLOAT_EQ(scores[0], 0.0f);
 }
 
-TEST_F(ExecutionManagerTest, GetCurrentStep) {
+TEST_P(ExecutionManagerTest, GetCurrentStep) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -910,7 +1346,7 @@ TEST_F(ExecutionManagerTest, GetCurrentStep) {
   EXPECT_EQ(step2, 3);
 }
 
-TEST_F(ExecutionManagerTest, SetCurrentStep) {
+TEST_P(ExecutionManagerTest, SetCurrentStep) {
   CreateExecutionManager(CreateDefaultFakeLlmExecutor());
   ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
   ASSERT_OK_AND_ASSIGN(const SessionId session_id,
@@ -947,6 +1383,94 @@ TEST_F(ExecutionManagerTest, SetCurrentStep) {
   EXPECT_THAT(execution_manager_->SetCurrentStep(*session_info, 5),
               testing::status::StatusIs(absl::StatusCode::kInvalidArgument));
 }
+
+TEST_P(ExecutionManagerTest, DestructorWaitsForActiveTasks) {
+  if (GetParam() == ExecutionManagerType::kSerial) {
+    GTEST_SKIP() << "Skipping for SerialExecutionManager as it is synchronous";
+  }
+  auto fake_llm_executor = CreateDefaultFakeLlmExecutor();
+  fake_llm_executor->SetDecodeDelay(absl::Milliseconds(500));
+  CreateExecutionManager(std::move(fake_llm_executor));
+
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  // Add prefill task and wait.
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1, 2, 3}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId prefill_task_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, prefill_task_id, std::move(inputs), {},
+      std::make_shared<std::atomic<bool>>(false), nullptr));
+  ASSERT_OK(
+      execution_manager_->WaitUntilDone(prefill_task_id, absl::Seconds(3)));
+
+  // Now add decode task.
+  ASSERT_OK_AND_ASSIGN(const TaskId task_id,
+                       execution_manager_->GetNewTaskId());
+
+  auto task_states = std::make_shared<std::vector<TaskState>>();
+  auto mutex = std::make_shared<absl::Mutex>();
+
+  ASSERT_OK(execution_manager_->AddDecodeTask(
+      session_id, task_id, {}, RepetitionPenaltyConfig::Default(),
+      NoRepeatNgramConfig::Default(), SuppressTokensConfig::Default(),
+      /*constraint=*/nullptr, std::make_shared<std::atomic<bool>>(false),
+      [task_states, mutex](absl::StatusOr<Responses> responses) {
+        absl::MutexLock lock(*mutex);
+        if (responses.ok()) {
+          task_states->push_back(responses->GetTaskState());
+        } else {
+          task_states->push_back(TaskState::kFailed);
+        }
+      }));
+
+  execution_manager_.reset();
+
+  absl::MutexLock lock(*mutex);
+  EXPECT_THAT(*task_states, testing::Contains(TaskState::kDone));
+}
+
+TEST_P(ExecutionManagerTest, ReleaseSessionCleansUpTasksAndQueue) {
+  CreateExecutionManager(CreateDefaultFakeLlmExecutor());
+  ASSERT_OK_AND_ASSIGN(auto session_config, CreateDefaultSessionConfig());
+  ASSERT_OK_AND_ASSIGN(const SessionId session_id,
+                       execution_manager_->RegisterNewSession(session_config));
+
+  std::vector<InputData> inputs;
+  ASSERT_OK_AND_ASSIGN(auto input_text,
+                       tokenizer_->TokenIdsToTensorBuffer({1, 2, 3}));
+  inputs.push_back(InputText(std::move(input_text)));
+  ASSERT_OK_AND_ASSIGN(const TaskId task_id,
+                       execution_manager_->GetNewTaskId());
+  ASSERT_OK(execution_manager_->AddPrefillTask(
+      session_id, task_id, std::move(inputs), {},
+      std::make_shared<std::atomic<bool>>(false), nullptr));
+
+  // Release session. This should clean up the task from task_lookup_ and
+  // also ready_queue_ (for SerialExecutionManager).
+  ASSERT_OK(execution_manager_->ReleaseSession(session_id));
+
+  // WaitUntilAllDone should complete without error.
+  EXPECT_OK(execution_manager_->WaitUntilAllDone(absl::Seconds(1)));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ExecutionManagerTests, ExecutionManagerTest,
+    ::testing::Values(ExecutionManagerType::kThreaded,
+                      ExecutionManagerType::kSerial),
+    [](const ::testing::TestParamInfo<ExecutionManagerTest::ParamType>& info) {
+      switch (info.param) {
+        case ExecutionManagerType::kThreaded:
+          return "Threaded";
+        case ExecutionManagerType::kSerial:
+          return "Serial";
+      }
+    });
 
 }  // namespace
 }  // namespace litert::lm

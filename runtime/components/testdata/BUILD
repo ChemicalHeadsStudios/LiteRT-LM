@@ -14,10 +14,14 @@
 
 package(
     default_hdrs_check = "strict",
-    default_visibility = ["//:__subpackages__"],
+    default_visibility = [
+        "//:__subpackages__",
+    ],
 )
 
 filegroup(
     name = "testdata",
     srcs = glob(["*"]),
 )
+
+exports_files(glob(["*.jinja"]))

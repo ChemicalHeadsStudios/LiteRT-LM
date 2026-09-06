@@ -30,8 +30,24 @@
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/config_registry.h"
 #include "runtime/engine/io_types.h"
+#include "support/preprocessor/audio_preprocessor.h"
+#include "support/preprocessor/audio_preprocessor_miniaudio.h"
+#include "support/preprocessor/image_preprocessor.h"
+#include "support/preprocessor/stb_image_preprocessor.h"
+#include "support/tokenizer/sentencepiece_tokenizer.h"
+#include "support/tokenizer/tokenizer.h"
 
 namespace litert::lm {
+
+using ::litert::support::AudioPreprocessor;
+using ::litert::support::AudioPreprocessorConfig;
+using ::litert::support::AudioPreprocessorMiniAudio;
+using ::litert::support::ImagePreprocessor;
+using ::litert::support::ImagePreprocessParameter;
+using ::litert::support::SentencePieceTokenizer;
+using ::litert::support::StbImagePreprocessor;
+using ::litert::support::Tokenizer;
+using ::litert::support::TokenizerType;
 
 // ModelDataProcessor is a model-specific component that converts between the
 // generic Json messages and the Litert LM InputData type.
@@ -117,6 +133,19 @@ class ModelDataProcessor {
 
   // Clones the state of the other model data processor.
   virtual absl::Status CloneState(const ModelDataProcessor& other) = 0;
+
+  // Sets whether to return an error status when a tool call fails to parse.
+  void SetReturnErrorOnParseFailure(bool return_error_on_parse_failure) {
+    return_error_on_parse_failure_ = return_error_on_parse_failure;
+  }
+
+  // Returns whether to return an error status when a tool call fails to parse.
+  bool ReturnErrorOnParseFailure() const {
+    return return_error_on_parse_failure_;
+  }
+
+ private:
+  bool return_error_on_parse_failure_ = true;
 };
 
 // TypeSafeModelDataProcessor is a ModelDataProcessor that expects a specific
@@ -159,15 +188,13 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
       return absl::InvalidArgumentError(
           "DataProcessorArguments does not hold the expected type");
     }
-    // A6: Inject finish_reason based on TaskState.
+    // Report why generation stopped, using the same vocabulary as the OpenAI
+    // chat completion schema so callers can branch on it directly.
     if (result.ok()) {
-      auto task_state = responses.GetTaskState();
+      const TaskState task_state = responses.GetTaskState();
       if (task_state == TaskState::kDone) {
-        if (result->contains("tool_calls")) {
-          (*result)["finish_reason"] = "tool_calls";
-        } else {
-          (*result)["finish_reason"] = "stop";
-        }
+        (*result)["finish_reason"] =
+            result->contains("tool_calls") ? "tool_calls" : "stop";
       } else if (task_state == TaskState::kMaxNumTokensReached) {
         (*result)["finish_reason"] = "length";
       }
@@ -187,6 +214,7 @@ class TypeSafeModelDataProcessor : public ModelDataProcessor {
       return absl::InvalidArgumentError(
           "The other ModelDataProcessor is not of the expected type.");
     }
+    SetReturnErrorOnParseFailure(typed_other->ReturnErrorOnParseFailure());
     return this->CloneStateImpl(*typed_other);
   }
 

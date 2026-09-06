@@ -41,13 +41,36 @@ using ::litert::lm::ScopedFile;
 using ::litert::lm::StringToModelType;
 
 #ifdef ENABLE_SENTENCEPIECE_TOKENIZER
+TEST(ModelResourcesTest, InitializeWithFileBackedLiteRtModel) {
+  const auto model_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "litert_lm/runtime/testdata/test_lm.litertlm";
+  ASSERT_OK_AND_ASSIGN(auto model_file, ScopedFile::Open(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file)));
+
+  const auto expected_model_size =
+      loader->GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size();
+  ASSERT_GT(expected_model_size, 0);
+
+  auto model_resources = ModelResourcesLitertLm::Create(
+      std::move(loader), /*enable_file_backed_model_loading=*/true);
+  ASSERT_OK(model_resources);
+
+  auto tflite_model =
+      model_resources.value()->GetTFLiteModel(ModelType::kTfLitePrefillDecode);
+  ASSERT_OK(tflite_model);
+  ASSERT_GT(tflite_model.value()->GetNumSignatures(), 0);
+}
+
 TEST(ModelResourcesTest, InitializeWithValidLitertLmLoader) {
   const auto model_path =
       std::filesystem::path(::testing::SrcDir()) /
       "litert_lm/runtime/testdata/test_lm.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  auto loader = std::make_unique<LitertLmLoader>(std::move(model_file.value()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
   ASSERT_GT(loader->GetSentencePieceTokenizer()->Size(), 0);
   ASSERT_GT(loader->GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
 
@@ -70,7 +93,8 @@ TEST(ModelResourcesTest, InitializeWithExternalWeights) {
       "litert_lm/runtime/testdata/test_lm_external_weights.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  auto loader = std::make_unique<LitertLmLoader>(std::move(model_file.value()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
   ASSERT_GT(loader->GetSentencePieceTokenizer()->Size(), 0);
   ASSERT_GT(loader->GetTFLiteModel(ModelType::kTfLitePrefillDecode).Size(), 0);
   ASSERT_GT(loader->GetTFLiteWeights(ModelType::kTfLitePrefillDecode).Size(),
@@ -97,7 +121,8 @@ TEST(ModelResourcesTest, InitializeWithHuggingFaceTokenizer) {
       "litert_lm/runtime/testdata/test_hf_tokenizer.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  auto loader = std::make_unique<LitertLmLoader>(std::move(model_file.value()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
   ASSERT_GT(loader->GetHuggingFaceTokenizer()->Size(), 0);
 
   auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
@@ -140,7 +165,8 @@ TEST(ModelResourcesTest, GetTFLiteModelNotFound) {
       "litert_lm/runtime/testdata/test_lm.litertlm";
   auto model_file = ScopedFile::Open(model_path.string());
   ASSERT_TRUE(model_file.ok());
-  auto loader = std::make_unique<LitertLmLoader>(std::move(model_file.value()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file.value())));
 
   auto model_resources = ModelResourcesLitertLm::Create(std::move(loader));
   ASSERT_OK(model_resources);
@@ -175,6 +201,39 @@ TEST(ModelResourcesTest, GetTFLiteModelNotFoundTask) {
               testing::status::StatusIs(absl::StatusCode::kNotFound));
 }
 #endif  // ENABLE_SENTENCEPIECE_TOKENIZER
+
+TEST(ModelResourcesTest, GetTFLiteModelSectionFileRegion) {
+  const auto model_path =
+      std::filesystem::path(::testing::SrcDir()) /
+      "litert_lm/runtime/testdata/test_lm.litertlm";
+  ASSERT_OK_AND_ASSIGN(auto model_file, ScopedFile::Open(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(auto loader,
+                       LitertLmLoader::Create(std::move(model_file)));
+
+  ASSERT_OK_AND_ASSIGN(auto model_resources,
+                       ModelResourcesLitertLm::Create(std::move(loader)));
+
+  // Success case: model is present.
+  ASSERT_OK_AND_ASSIGN(
+      auto file_region,
+      model_resources->GetTFLiteModelSectionFileRegion(
+          ModelType::kTfLitePrefillDecode));
+  EXPECT_GT(file_region.offset, 0);
+  EXPECT_GT(file_region.size, 0);
+
+  // Compare with the size from GetTFLiteModelBuffer.
+  ASSERT_OK_AND_ASSIGN(
+      auto model_buffer,
+      model_resources->GetTFLiteModelBuffer(
+          ModelType::kTfLitePrefillDecode));
+  EXPECT_EQ(file_region.size, model_buffer.size());
+
+  // Error case: model type not found in the loader.
+  EXPECT_THAT(
+      model_resources->GetTFLiteModelSectionFileRegion(
+          ModelType::kTfLiteEmbedder),
+      testing::status::StatusIs(absl::StatusCode::kNotFound));
+}
 
 TEST(ModelTypeConversionTest, StringToModelType) {
   auto result = StringToModelType("tf_lite_prefill_decode");
@@ -213,6 +272,14 @@ TEST(ModelTypeConversionTest, StringToModelType) {
   ASSERT_OK(result);
   EXPECT_EQ(result.value(), ModelType::kTfLiteMtpDrafter);
 
+  result = StringToModelType("tf_lite_text_encoder");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteTextEncoder);
+
+  result = StringToModelType("TF_LITE_TEXT_ENCODER");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteTextEncoder);
+
   result = StringToModelType("unknown");
   EXPECT_FALSE(result.ok());
 }
@@ -227,6 +294,8 @@ TEST(ModelTypeConversionTest, ModelTypeToString) {
             "TF_LITE_ARTISAN_TEXT_DECODER");
   EXPECT_EQ(ModelTypeToString(ModelType::kTfLiteMtpDrafter),
             "TF_LITE_MTP_DRAFTER");
+  EXPECT_EQ(ModelTypeToString(ModelType::kTfLiteTextEncoder),
+            "TF_LITE_TEXT_ENCODER");
   EXPECT_EQ(ModelTypeToString(ModelType::kUnknown), "UNKNOWN");
 }
 

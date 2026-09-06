@@ -24,6 +24,10 @@ load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 load("//:version.bzl", "VERSION")
 
+package(
+    default_visibility = ["//python/litert_lm_cli:__subpackages__"],
+)
+
 version = select({
     "//python:dev_build": VERSION + ".dev$(DEV_VERSION)",
     "//conditions:default": VERSION,
@@ -36,12 +40,24 @@ genrule(
 )
 
 pytype_strict_library(
+    name = "config",
+    srcs = ["config.py"],
+    data = ["config_schema.json"],
+    deps = [
+        requirement("click"),
+    ],
+    imports = [".."],
+)
+
+pytype_strict_library(
     name = "model",
     srcs = ["model.py"],
     deps = [
+        ":config",
         "//python/litert_lm",
+        "//python/litert_lm_builder:litertlm_builder",
+        "//python/litert_lm_builder:litertlm_peek",
         requirement("click"),
-        requirement("prompt_toolkit"),
     ],
     imports = [".."],
 )
@@ -72,6 +88,27 @@ pytype_strict_library(
     imports = [".."],
 )
 
+pytype_strict_library(
+    name = "common",
+    srcs = ["common.py"],
+    deps = [
+        ":config",
+        requirement("click"),
+    ],
+    imports = [".."],
+)
+
+pytype_strict_library(
+    name = "huggingface_download",
+    srcs = ["huggingface_download.py"],
+    deps = [
+        ":common",
+        ":model",
+        requirement("click"),
+    ],
+    imports = [".."],
+)
+
 py_test(
     name = "venv_manager_test",
     srcs = ["venv_manager_test.py"],
@@ -79,6 +116,90 @@ py_test(
     deps = [
         ":venv_manager",
         "@absl_py//absl/testing:absltest",
+    ],
+    imports = [".."],
+)
+
+py_test(
+    name = "common_test",
+    srcs = ["common_test.py"],
+    tags = ["nowindows"],
+    deps = [
+        ":common",
+        "@absl_py//absl/testing:absltest",
+        "@absl_py//absl/testing:parameterized",
+        requirement("click"),
+    ],
+    imports = [".."],
+)
+
+py_test(
+    name = "model_test",
+    srcs = ["model_test.py"],
+    tags = ["nowindows"],
+    deps = [
+        ":config",
+        ":model",
+        "//python/litert_lm",
+        "//python/litert_lm_builder:litertlm_builder",
+        "@absl_py//absl/testing:absltest",
+        "@absl_py//absl/testing:parameterized",
+    ],
+)
+
+py_test(
+    name = "config_test",
+    srcs = ["config_test.py"],
+    tags = ["nowindows"],
+    deps = [
+        ":common",
+        ":config",
+        "@absl_py//absl/testing:absltest",
+        "@absl_py//absl/testing:parameterized",
+        requirement("click"),
+        requirement("jsonschema"),
+    ],
+    imports = [".."],
+)
+
+py_test(
+    name = "huggingface_download_test",
+    srcs = ["huggingface_download_test.py"],
+    tags = ["nowindows"],
+    deps = [
+        ":huggingface_download",
+        ":model",
+        "@absl_py//absl/testing:absltest",
+        requirement("click"),
+    ],
+    imports = [".."],
+)
+
+pytype_strict_library(
+    name = "cli_helpers",
+    srcs = ["cli_helpers.py"],
+    deps = [
+        ":huggingface_download",
+        ":model",
+        requirement("click"),
+        requirement("prompt_toolkit"),
+        requirement("questionary"),
+    ],
+    imports = [".."],
+)
+
+py_test(
+    name = "cli_helpers_test",
+    srcs = ["cli_helpers_test.py"],
+    tags = ["nowindows"],
+    deps = [
+        ":cli_helpers",
+        ":huggingface_download",
+        ":model",
+        "@absl_py//absl/testing:absltest",
+        requirement("click"),
+        requirement("prompt_toolkit"),
+        requirement("questionary"),
     ],
     imports = [".."],
 )
@@ -92,13 +213,22 @@ pytype_strict_library(
     name = "main_lib",
     srcs = ["main.py"],
     deps = [
+        ":common",
         ":help_formatter",
-        ":model",
-        ":venv_manager",
         ":version",
         "//python/litert_lm",
+        "//python/litert_lm_cli/commands:benchmark",
+        "//python/litert_lm_cli/commands:convert",
+        "//python/litert_lm_cli/commands:delete",
+        "//python/litert_lm_cli/commands:describe",
+        "//python/litert_lm_cli/commands:import",  # fixdeps: keep
+        "//python/litert_lm_cli/commands:list",
+        "//python/litert_lm_cli/commands:pack",
+        "//python/litert_lm_cli/commands:rename",
+        "//python/litert_lm_cli/commands:run",
+        "//python/litert_lm_cli/commands:serve",
+        "//python/litert_lm_cli/commands:unpack",
         requirement("click"),
-        requirement("huggingface_hub"),
     ],
     imports = [".."],
 )
@@ -110,8 +240,10 @@ py_test(
         "nowindows",
     ],
     deps = [
+        ":common",
         ":main_lib",
-        ":model",
+        "//python/litert_lm",
+        "//python/litert_lm_cli/commands:run",
         "@absl_py//absl/testing:absltest",
         requirement("click"),
         requirement("prompt_toolkit"),
@@ -127,8 +259,11 @@ pytype_strict_binary(
     main = "main.py",
     tags = [
         "noios",
-        "nomacos",
         "nowindows",
+    ],
+    visibility = [
+        "//learning/language/tunelab/gemma:__subpackages__",
+        "//:__subpackages__",
     ],
     deps = [
         ":main_lib",
@@ -151,16 +286,13 @@ py_wheel(
     }),
     platform = "any",
     python_tag = "py3",
+    python_requires = ">=3.10",
     summary = "LiteRT-LM command line tool",
     description_file = "README.md",
     license = "Apache-2.0",
     homepage = "https://github.com/google-ai-edge/LiteRT-LM",
     classifiers = [
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
     ],
@@ -171,13 +303,20 @@ py_wheel(
             "litert-lm = litert_lm_cli.main:main",
         ],
     },
-    requires = select({
-        "//python:dev_build": ["litert-lm-api-nightly"],
-        "//conditions:default": ["litert-lm-api"],
-    }) + [
-        "click",
-        "huggingface_hub",
-        "prompt_toolkit",
-    ],
+    requires_file = ":gen_requires",
     deps = [":package"],
+)
+
+genrule(
+    name = "gen_requires",
+    outs = ["requires.txt"],
+    cmd = select({
+        "//python:dev_build": "echo 'litert-lm-api-nightly==" + VERSION + ".dev$(DEV_VERSION)' > $@ && echo 'litert-lm-builder-nightly==" + VERSION + ".dev$(DEV_VERSION)' >> $@",
+        "//conditions:default": "echo 'litert-lm-api==" + VERSION + "' > $@ && echo 'litert-lm-builder==" + VERSION + "' >> $@",
+    }) + """
+        echo 'click' >> $@
+        echo 'prompt_toolkit' >> $@
+        echo 'typing-extensions' >> $@
+        echo 'questionary' >> $@
+    """,
 )

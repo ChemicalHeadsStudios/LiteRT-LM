@@ -14,29 +14,55 @@
 
 """Utility functions for litert-lm models."""
 
+from __future__ import annotations
+
+import collections
 import dataclasses
 import glob
 import importlib.util
 import inspect
-import json
+import io
+import mimetypes
 import os
 import pathlib
-import traceback
+from typing import Any
 
 import click
-import prompt_toolkit
-from prompt_toolkit import key_binding
 
 import litert_lm
+from litert_lm_builder import litertlm_builder
+from litert_lm_builder import litertlm_peek
+from litert_lm_cli import config
 
-try:
-  # pylint: disable=g-import-not-at-top
-  from litert_lm.adb import adb_benchmark
-  from litert_lm.adb import adb_engine
+# The default model types representing the main text model components.
+_DEFAULT_TARGET_MODEL_TYPES = frozenset({
+    litertlm_builder.TfLiteModelType.ARTISAN_TEXT_DECODER.value,
+    litertlm_builder.TfLiteModelType.PREFILL_DECODE.value,
+})
 
-  _HAS_ADB = True
-except ImportError:
-  _HAS_ADB = False
+
+def get_attachment_type(path: str) -> str:
+  """Returns the attachment type (audio or image) from the file path.
+
+  Args:
+    path: Path to the attachment.
+
+  Returns:
+    'audio' or 'image'.
+
+  Raises:
+    ValueError: If the file type cannot be determined or is unsupported.
+  """
+  mime_type, _ = mimetypes.guess_type(path)
+  if mime_type:
+    if mime_type.startswith("audio/"):
+      return "audio"
+    elif mime_type.startswith("image/"):
+      return "image"
+    else:
+      raise ValueError(f"Unsupported attachment type for '{path}': {mime_type}")
+  else:
+    raise ValueError(f"Could not determine file type for attachment '{path}'.")
 
 
 def load_preset(preset: str):
@@ -86,38 +112,239 @@ def load_preset(preset: str):
   return tools, messages, extra_context
 
 
-class LoggingToolEventHandler(litert_lm.ToolEventHandler):
-  """Log tool call and tool response events."""
+def model_default_backend(
+    model_path: str,
+    target_model_types: collections.abc.Container[
+        str
+    ] = _DEFAULT_TARGET_MODEL_TYPES,
+) -> str | None:
+  """Inspects the .litertlm file metadata to detect the default backend.
 
-  def __init__(self, model):
-    self.model = model
+  Args:
+    model_path: The path to the .litertlm model file.
+    target_model_types: The model types to look for. Defaults to main model
+      types (ARTISAN_TEXT_DECODER, PREFILL_DECODE).
 
-  def approve_tool_call(self, tool_call):
-    """Logs a tool call."""
-    if self.model.active_channel is not None:
-      click.echo("\n", nl=False)
-      self.model.active_channel = None
+  Returns:
+    The default backend name (e.g., 'gpu', 'cpu') or None if not found.
+    Returning None for optional adapters (audio/vision) when they are not
+    present in the model is crucial. It signals the CLI to pass None to the
+    Engine, safely disabling them and preventing C++ initialization crashes.
+  """
+  try:
+    with io.StringIO() as dummy_out:
+      metadata = litertlm_peek.read_litertlm_header(model_path, dummy_out)
+      if metadata:
+        section_metadata = metadata.SectionMetadata()
+        if section_metadata:
+          for i in range(section_metadata.ObjectsLength()):
+            section = section_metadata.Objects(i)
+            if not section:
+              continue
+            model_type = litertlm_peek.get_model_type(section)
+            if model_type:
+              model_type_lower = model_type.lower()
+              if model_type_lower in target_model_types:
+                if (
+                    model_type_lower
+                    == litertlm_builder.TfLiteModelType.ARTISAN_TEXT_DECODER.value
+                ):
+                  return "gpu"
+                if section.ItemsLength() > 0:
+                  for j in range(section.ItemsLength()):
+                    item = section.Items(j)
+                    if item is None:
+                      continue
+                    item_dict = litertlm_peek.kvp_to_dict(item)
+                    if item_dict.get("key") == "backend_constraint":
+                      val = item_dict.get("value")
+                      if val:
+                        backends = [b.strip().lower() for b in val.split(",")]
+                        if backends:
+                          return backends[0]
+                return "cpu"
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    click.echo(
+        click.style(f"Failed to inspect model metadata: {e!r}", fg="yellow")
+    )
+
+  # Fallback for main model if not found in metadata or on error.
+  # Optional adapters return None if not found, to disable them.
+  if target_model_types == _DEFAULT_TARGET_MODEL_TYPES:
+    return "cpu"
+  return None
+
+
+def _create_backend_obj(
+    backend_name: str | None,
+    cpu_thread_count: int | None = None,
+    gpu_decode_steps_per_sync: int | None = None,
+) -> litert_lm.Backend | None:
+  """Creates a litert_lm.Backend object from name, or returns None."""
+  if backend_name is None:
+    return None
+  elif backend_name == "gpu":
+    return litert_lm.Backend.GPU(
+        gpu_decode_steps_per_sync=gpu_decode_steps_per_sync
+    )
+  elif backend_name == "npu":
+    return litert_lm.Backend.NPU()
+  else:
+    return litert_lm.Backend.CPU(thread_count=cpu_thread_count)
+
+
+def parse_backend(
+    backend: str | None = None,
+    *,
+    model_obj: Model,
+    cpu_thread_count: int | None = None,
+    target_model_types: collections.abc.Container[
+        str
+    ] = _DEFAULT_TARGET_MODEL_TYPES,
+    label: str | None = None,
+    gpu_decode_steps_per_sync: int | None = None,
+) -> litert_lm.Backend | None:
+  """Parses the backend string and resolves it against model constraints.
+
+  Args:
+    backend: The backend requested by the user (e.g., "cpu", "gpu", "npu").
+    model_obj: Model instance to check for constraints.
+    cpu_thread_count: Optional thread count for CPU backend.
+    target_model_types: Container of model types to look for when resolving
+      default backend. Defaults to main model types.
+    label: Optional label for the backend (e.g., "audio", "vision") used in log
+      messages.
+    gpu_decode_steps_per_sync: Optional decode steps per sync for GPU backend.
+
+  Returns:
+    The resolved litert_lm.Backend to use, or None if not supported.
+  """
+  model_cfg = config.get_model_config(model_obj.model_id)
+  is_main_model = target_model_types == _DEFAULT_TARGET_MODEL_TYPES
+
+  # 1. Resolve Backend
+  resolved_backend = backend
+  backend_from_config = False
+  if resolved_backend is None:
+    if is_main_model and model_cfg.backend is not None:
+      resolved_backend = model_cfg.backend
+      backend_from_config = True
+    elif label == "vision" and model_cfg.vision_backend is not None:
+      resolved_backend = model_cfg.vision_backend
+      backend_from_config = True
+    elif label == "audio" and model_cfg.audio_backend is not None:
+      resolved_backend = model_cfg.audio_backend
+      backend_from_config = True
+    else:
+      resolved_backend = model_default_backend(
+          model_obj.model_path, target_model_types
+      )
+      # Print info message for model's default backend if it is not CPU
+      if resolved_backend and resolved_backend != "cpu":
+        label_str = f" for {label}" if label else ""
+        click.echo(
+            click.style(
+                f"Using model's default backend{label_str}: {resolved_backend}",
+                fg="bright_black",
+            )
+        )
+
+  if resolved_backend is None:
+    return None
+
+  # Print info message if backend came from config
+  if backend_from_config:
+    label_str = f" for {label}" if label else ""
     click.echo(
         click.style(
-            f"[tool_call] {json.dumps(tool_call['function'])}", fg="green"
+            f"Using backend{label_str} from config for model"
+            f" '{model_obj.model_id}': {resolved_backend}",
+            fg="bright_black",
         )
     )
-    return True
 
-  def process_tool_response(self, tool_response):
-    """Logs a tool response."""
+  # 2. Resolve CPU Thread Count
+  resolved_threads = cpu_thread_count
+  threads_from_config = False
+  if resolved_threads is None:
+    if is_main_model and model_cfg.cpu_thread_count is not None:
+      resolved_threads = model_cfg.cpu_thread_count
+      threads_from_config = True
+
+  # Print info message if threads came from config
+  if threads_from_config:
     click.echo(
-        click.style(f"[tool_response] {json.dumps(tool_response)}", fg="green")
+        click.style(
+            "Using cpu_thread_count from config for model"
+            f" '{model_obj.model_id}': {resolved_threads}",
+            fg="bright_black",
+        )
     )
-    return tool_response
+
+  # 3. Resolve GPU Decode Steps Per Sync
+  resolved_gpu_decode_steps_per_sync = gpu_decode_steps_per_sync
+  gpu_decode_steps_from_config = False
+  if resolved_gpu_decode_steps_per_sync is None:
+    if is_main_model and model_cfg.gpu_decode_steps_per_sync is not None:
+      resolved_gpu_decode_steps_per_sync = model_cfg.gpu_decode_steps_per_sync
+      gpu_decode_steps_from_config = True
+
+  # Print info message if gpu_decode_steps_per_sync came from config
+  if gpu_decode_steps_from_config:
+    click.echo(
+        click.style(
+            "Using gpu_decode_steps_per_sync from config for model"
+            f" '{model_obj.model_id}': {resolved_gpu_decode_steps_per_sync}",
+            fg="bright_black",
+        )
+    )
+
+  return _create_backend_obj(
+      resolved_backend.lower(),
+      resolved_threads,
+      resolved_gpu_decode_steps_per_sync,
+  )
 
 
-def _parse_backend(backend: str) -> litert_lm.Backend:
-  """Parses the backend string and returns the corresponding Backend enum."""
-  backend_lower = backend.lower()
-  if backend_lower == "gpu":
-    return litert_lm.Backend.GPU
-  return litert_lm.Backend.CPU
+def resolve_config_option(
+    value: Any,
+    model_obj: Model | None,
+    config_key: str,
+    label: str | None = None,
+) -> Any:
+  """Resolves an option value, falling back to config if value is None.
+
+  Args:
+    value: Explicit value passed by CLI/user (if any).
+    model_obj: Model instance (if available).
+    config_key: Attribute name on ModelConfig (e.g. "cache", "max_num_tokens").
+    label: Display label for logging (defaults to config_key).
+
+  Returns:
+    The explicit value if set, otherwise value from ModelConfig if set,
+    otherwise None.
+  """
+  if value is not None or model_obj is None:
+    return value
+
+  model_id = getattr(model_obj, "model_id", None)
+  if not model_id:
+    return value
+
+  model_cfg = config.get_model_config(model_id)
+  config_val = getattr(model_cfg, config_key, None)
+  if config_val is not None:
+    display_label = label or config_key
+    click.echo(
+        click.style(
+            f"Using {display_label} from config for model"
+            f" '{model_id}': {config_val}",
+            fg="bright_black",
+        )
+    )
+    return config_val
+
+  return None
 
 
 @dataclasses.dataclass
@@ -127,13 +354,10 @@ class Model:
   Attributes:
     model_id: The ID of the model.
     model_path: The local path to the model file.
-    active_channel: The name of the currently active channel, or None if default
-      text is being printed.
   """
 
   model_id: str
   model_path: str
-  active_channel: str | None = None
 
   def exists(self) -> bool:
     """Returns True if the model file exists locally."""
@@ -142,305 +366,6 @@ class Model:
   def to_str(self) -> str:
     """Returns a string representation of the model."""
     return self.model_id
-
-  def run_interactive(
-      self,
-      is_android: bool = False,
-      backend: str = "cpu",
-      preset: str | None = None,
-      prompt: str | None = None,
-      enable_speculative_decoding: bool | None = None,
-      no_template: bool = False,
-  ):
-    """Runs the model interactively or with a single prompt.
-
-    Args:
-      is_android: Whether to run the model on an Android device via ADB.
-      backend: The backend to use (cpu or gpu).
-      preset: Path to a Python file containing tool functions and system
-        instructions.
-      prompt: A single prompt to run once and exit.
-      enable_speculative_decoding: Whether to enable speculative decoding. If
-        None, use the model's default.
-      no_template: Interact with the model directly without applying prompt
-        templates or stripping stop tokens.
-    """
-    if not self.exists():
-      click.echo(
-          click.style(
-              f"Could not find {self.to_str()} locally in {self.model_path}.",
-              fg="red",
-          )
-      )
-      return
-
-    try:
-      backend_val = _parse_backend(backend)
-
-      if is_android:
-        if not _HAS_ADB:
-          raise ImportError("litert_lm.adb dependencies are not available.")
-        engine_cm = adb_engine.AdbEngine(self.model_path, backend=backend_val)
-      else:
-        engine_cm = litert_lm.Engine(
-            self.model_path,
-            backend=backend_val,
-            enable_speculative_decoding=enable_speculative_decoding,
-        )
-
-      with engine_cm as engine:
-        if no_template:
-          runner_cm = engine.create_session(apply_prompt_template=False)
-        else:
-          tools = None
-          messages = None
-          extra_context = None
-          if preset:
-            tools, messages, extra_context = load_preset(preset)
-            if tools is None and messages is None and extra_context is None:
-              return
-
-          handler = LoggingToolEventHandler(self) if tools else None
-
-          runner_cm = engine.create_conversation(
-              tools=tools,
-              messages=messages,
-              tool_event_handler=handler,
-              extra_context=extra_context,
-          )
-
-        with runner_cm as runner:
-          if prompt:
-            if isinstance(runner, litert_lm.AbstractSession):
-              self._execute_raw_prompt(runner, prompt)
-            elif isinstance(runner, litert_lm.AbstractConversation):
-              self._execute_prompt(runner, prompt)
-            return
-
-          click.echo(
-              click.style(
-                  "[enter] submit | [ctrl+j] newline | [ctrl+c] clear/exit",
-                  fg="cyan",
-              )
-          )
-          click.echo()
-
-          history_path = os.path.join(
-              os.path.expanduser("~"), ".litert-lm", "history"
-          )
-          os.makedirs(os.path.dirname(history_path), exist_ok=True)
-
-          prompt_session = prompt_toolkit.PromptSession(
-              history=prompt_toolkit.history.FileHistory(history_path),
-              key_bindings=self._create_keybindings(),
-          )
-
-          while True:
-            try:
-              user_prompt = prompt_session.prompt(
-                  prompt_toolkit.ANSI(click.style("> ", fg="green", bold=True)),
-                  multiline=True,
-                  # Start the new line in the beginning of line. This makes
-                  # copying respecting the text.
-                  prompt_continuation=lambda width, line_number, is_soft_wrap: (
-                      ""
-                  ),
-              )
-              if not user_prompt:
-                continue
-
-              if isinstance(runner, litert_lm.AbstractSession):
-                self._execute_raw_prompt(
-                    runner,
-                    user_prompt,
-                )
-              elif isinstance(runner, litert_lm.AbstractConversation):
-                self._execute_prompt(
-                    runner,
-                    user_prompt,
-                )
-
-            except EOFError:
-              break
-            except KeyboardInterrupt:
-              # Catch Ctrl+C at the input prompt
-              click.echo()
-              continue
-            except Exception:  # pylint: disable=broad-exception-caught
-              click.echo(click.style("Error during inference", fg="red"))
-              traceback.print_exc()
-
-    except Exception:  # pylint: disable=broad-exception-caught
-      click.echo(click.style("An error occurred", fg="red"))
-      traceback.print_exc()
-
-  def _execute_prompt(
-      self, conversation: litert_lm.AbstractConversation, prompt: str
-  ):
-    """Executes a single prompt and prints the result."""
-    self.active_channel = None
-    stream = conversation.send_message_async(prompt)
-    try:
-      for chunk in stream:
-        # Handle regular content
-        content_list = chunk.get("content", [])
-        for item in content_list:
-          if item.get("type") == "text":
-            if self.active_channel is not None:
-              click.echo()
-              self.active_channel = None
-            click.echo(click.style(item.get("text", ""), fg="yellow"), nl=False)
-
-        # Handle channels
-        channels = chunk.get("channels", {})
-        for channel_name, channel_content in channels.items():
-          if self.active_channel != channel_name:
-            if self.active_channel is not None:
-              click.echo()
-            click.echo(click.style(f"[{channel_name}] ", fg="blue"), nl=False)
-            self.active_channel = channel_name
-          click.echo(click.style(channel_content, fg="yellow"), nl=False)
-      if self.active_channel is not None:
-        click.echo()
-      else:
-        click.echo()
-    except KeyboardInterrupt:
-      conversation.cancel_process()
-      # Empty the iterator queue.
-      # This ensures we don't throw away StopIteration.
-      for _ in stream:
-        pass
-      click.echo(click.style("\n[Generation cancelled]", dim=True))
-
-  def _execute_raw_prompt(
-      self, session: litert_lm.AbstractSession, prompt: str
-  ):
-    """Executes a single raw prompt and prints the result."""
-    session.run_prefill([prompt])
-    stream = session.run_decode_async()
-    try:
-      for chunk in stream:
-        if chunk.texts:
-          click.echo(click.style(chunk.texts[0], fg="yellow"), nl=False)
-      click.echo()
-    except KeyboardInterrupt:
-      # Empty the iterator queue.
-      for _ in stream:
-        pass
-      click.echo(click.style("\n[Generation cancelled]", dim=True))
-
-  def _create_keybindings(self) -> key_binding.KeyBindings:
-    """Creates keybindings for the interactive prompt."""
-    kb = key_binding.KeyBindings()
-
-    # Key binding for sending the prompt.
-    @kb.add("enter")
-    def _handle_enter(event):
-      buffer = event.current_buffer
-      if buffer.text.strip():
-        buffer.validate_and_handle()
-
-    # Key binding for new line. Note that terminal cannot take
-    # "shift+enter", and "ctrl+enter"
-    @kb.add("c-j")  # standard terminal convention.
-    @kb.add("escape", "enter")  # alt+enter and esc+enter
-    def _handle_newline(event):
-      event.current_buffer.insert_text("\n")
-
-    # Key binding for clearing input or exiting.
-    @kb.add("c-c")
-    def _handle_clear_or_exit(event):
-      buffer = event.current_buffer
-      if buffer.text:
-        buffer.text = ""
-      else:
-        event.app.exit(exception=EOFError)
-
-    return kb
-
-  def benchmark(
-      self,
-      prefill_tokens: int = 256,
-      decode_tokens: int = 256,
-      is_android: bool = False,
-      backend: str = "cpu",
-      enable_speculative_decoding: bool | None = None,
-  ):
-    """Benchmarks the model.
-
-    Args:
-      prefill_tokens: The number of tokens to prefill.
-      decode_tokens: The number of tokens to decode.
-      is_android: Whether to run the benchmark on an Android device via ADB.
-      backend: The backend to use (cpu or gpu).
-      enable_speculative_decoding: Whether to enable speculative decoding. If
-        None, use the model's default.
-    """
-    if not self.exists():
-      click.echo(
-          click.style(
-              f"Could not find {self.to_str()} locally in {self.model_path}.",
-              fg="red",
-          )
-      )
-      return
-
-    try:
-      backend_val = _parse_backend(backend)
-
-      if is_android:
-        if not _HAS_ADB:
-          raise ImportError("litert_lm.adb dependencies are not available.")
-        benchmark_obj = adb_benchmark.AdbBenchmark(
-            self.model_path,
-            backend=backend_val,
-            prefill_tokens=prefill_tokens,
-            decode_tokens=decode_tokens,
-            cache_dir=":nocache",
-        )
-      else:
-        benchmark_obj = litert_lm.Benchmark(
-            self.model_path,
-            backend=backend_val,
-            prefill_tokens=prefill_tokens,
-            decode_tokens=decode_tokens,
-            cache_dir=":nocache",
-            enable_speculative_decoding=enable_speculative_decoding,
-        )
-
-      click.echo(f"Benchmarking model: {self.to_str()} ({self.model_path})")
-      click.echo(f"Number of tokens in prefill: {prefill_tokens}")
-      click.echo(f"Number of tokens in decode : {decode_tokens}")
-      click.echo(f"Backend                    : {backend}")
-
-      spec_dec_str = "auto"
-      if enable_speculative_decoding is True:
-        spec_dec_str = "true"
-      elif enable_speculative_decoding is False:
-        spec_dec_str = "false"
-      print(f"Speculative decoding       : {spec_dec_str}")
-      if is_android:
-        click.echo("Target                     : Android")
-
-      result = benchmark_obj.run()
-
-      click.echo("----- Results -----")
-      click.echo(
-          f"Prefill speed:        {result.last_prefill_tokens_per_second:.2f}"
-          " tokens/s"
-      )
-      click.echo(
-          f"Decode speed:         {result.last_decode_tokens_per_second:.2f}"
-          " tokens/s"
-      )
-      click.echo(f"Init time:            {result.init_time_in_second:.4f} s")
-      click.echo(
-          f"Time to first token:  {result.time_to_first_token_in_second:.4f} s"
-      )
-
-    except Exception:  # pylint: disable=broad-exception-caught
-      click.echo(click.style("An error occurred during benchmarking", fg="red"))
-      traceback.print_exc()
 
   @classmethod
   def get_all_models(cls):
@@ -452,9 +377,7 @@ class Model:
     )
 
     return [
-        Model.from_model_id(
-            path.removesuffix("/model.litertlm").replace("--", "/")
-        )
+        Model.from_model_id(pathlib.Path(path).parent.name.replace("--", "/"))
         for path in model_paths
     ]
 
@@ -470,9 +393,15 @@ class Model:
   @classmethod
   def from_model_path(cls, model_path):
     """Creates a Model instance from a model path."""
+    abs_path = os.path.abspath(model_path)
+    if os.path.basename(abs_path) == "model.litertlm":
+      parent_name = pathlib.Path(abs_path).parent.name
+      model_id = parent_name.replace("--", "/")
+    else:
+      model_id = os.path.basename(abs_path)
     return cls(
-        model_id=os.path.basename(model_path),
-        model_path=os.path.abspath(model_path),
+        model_id=model_id,
+        model_path=abs_path,
     )
 
   @classmethod
@@ -494,10 +423,13 @@ def model_id_dir_name(model_id):
   return model_id.replace("/", "--")
 
 
+get_cli_base_dir = config.get_cli_base_dir
+
+
 # ~/.litert-lm/models
 def get_converted_models_base_dir():
   """Gets the base directory for all converted models."""
-  return os.path.join(os.path.expanduser("~"), ".litert-lm", "models")
+  return os.path.join(get_cli_base_dir(), "models")
 
 
 # ~/.litert-lm/models/<model_id>

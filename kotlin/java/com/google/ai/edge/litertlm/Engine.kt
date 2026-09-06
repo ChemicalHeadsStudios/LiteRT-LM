@@ -63,10 +63,13 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
       check(!isInitialized()) { "Engine is already initialized." }
 
       val mainBackendNumThreads =
-        (engineConfig.backend as? Backend.CPU)?.numOfThreads?.let { if (it > 0) it else -1 } ?: -1
+        (engineConfig.backend as? Backend.CPU)
+          ?.let { it.threadCount ?: it.numOfThreads }
+          ?.let { if (it > 0) it else -1 } ?: -1
       val audioBackendNumThreads =
-        (engineConfig.audioBackend as? Backend.CPU)?.numOfThreads?.let { if (it > 0) it else -1 }
-          ?: -1
+        (engineConfig.audioBackend as? Backend.CPU)
+          ?.let { it.threadCount ?: it.numOfThreads }
+          ?.let { if (it > 0) it else -1 } ?: -1
 
       handle =
         LiteRtLmJni.nativeCreateEngine(
@@ -77,6 +80,7 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
           engineConfig.audioBackend?.name ?: "",
           // convert the null value to -1 to avoid passing nullable object in JNI.
           engineConfig.maxNumTokens ?: -1,
+          engineConfig.maxNumImages ?: -1,
           engineConfig.cacheDir ?: "",
           @OptIn(ExperimentalApi::class) ExperimentalFlags.enableBenchmark,
           @OptIn(ExperimentalApi::class) ExperimentalFlags.enableSpeculativeDecoding,
@@ -85,6 +89,7 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
           (engineConfig.audioBackend as? Backend.NPU)?.nativeLibraryDir ?: "",
           mainBackendNumThreads,
           audioBackendNumThreads,
+          @OptIn(ExperimentalApi::class) ExperimentalFlags.visualTokenBudget ?: -1,
         )
     }
   }
@@ -150,9 +155,19 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
           channelsJson?.toString(),
           conversationConfig.extraContext.toJsonObject().toString(),
           ExperimentalFlags.enableConversationConstrainedDecoding,
+          ExperimentalFlags.filterChannelContentFromKvCache,
+          ExperimentalFlags.overwritePromptTemplate,
+          conversationConfig.loraConfig?.loraPath,
+          conversationConfig.loraConfig?.audioLoraPath,
+          conversationConfig.prefillPrefaceOnInit,
+          conversationConfig.maxOutputToken ?: -1,
+          conversationConfig.thinkingConfig,
+          conversationConfig.enableResponseFormat,
+          conversationConfig.enableSpeculativeDecoding,
         ),
         toolManager,
         conversationConfig.automaticToolCalling,
+        conversationConfig.enableResponseFormat,
       )
     }
   }
@@ -169,7 +184,15 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
       checkInitialized()
 
       // Using !! is okay. Checked initialization already.
-      return Session(LiteRtLmJni.nativeCreateSession(handle!!, sessionConfig.samplerConfig))
+      return Session(
+        LiteRtLmJni.nativeCreateSession(
+          handle!!,
+          sessionConfig.samplerConfig,
+          sessionConfig.loraConfig?.loraPath,
+          sessionConfig.loraConfig?.audioLoraPath,
+          sessionConfig.enableSpeculativeDecoding,
+        )
+      )
     }
   }
 

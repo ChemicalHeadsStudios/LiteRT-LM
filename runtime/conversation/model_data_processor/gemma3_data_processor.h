@@ -29,14 +29,14 @@
 #if !defined(LITERT_LM_FST_CONSTRAINTS_DISABLED)
 #include "runtime/components/constrained_decoding/gemma_model_constraint_provider.h"
 #endif
-#include "runtime/components/preprocessor/audio_preprocessor.h"
-#include "runtime/components/preprocessor/image_preprocessor.h"
 #include "runtime/components/prompt_template.h"
-#include "runtime/components/tokenizer.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/gemma3_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/model_data_processor.h"
 #include "runtime/engine/io_types.h"
+#include "support/preprocessor/audio_preprocessor.h"
+#include "support/preprocessor/image_preprocessor.h"
+#include "support/tokenizer/tokenizer.h"
 
 namespace litert::lm {
 
@@ -75,6 +75,12 @@ class Gemma3DataProcessor
   // Returns the end of tool call blocks.
   absl::string_view CodeFenceEnd() const override;
 
+  absl::StatusOr<SingleTurnTemplateRenderResult> RenderSingleTurnTemplate(
+      std::vector<Message>& history, const Preface& preface,
+      const Message& message, const PromptTemplate& prompt_template,
+      bool current_is_appending_message, bool append_message,
+      std::optional<nlohmann::ordered_json> extra_context) const override;
+
  private:
 #if defined(LITERT_LM_FST_CONSTRAINTS_DISABLED)
   explicit Gemma3DataProcessor(
@@ -110,12 +116,6 @@ class Gemma3DataProcessor
   absl::StatusOr<Message> ToMessageImpl(
       const Responses& responses,
       const Gemma3DataProcessorArguments& args) const override;
-
-  absl::StatusOr<SingleTurnTemplateRenderResult> RenderSingleTurnTemplate(
-      std::vector<Message>& history, const Preface& preface,
-      const Message& message, const PromptTemplate& prompt_template,
-      bool current_is_appending_message, bool append_message,
-      std::optional<nlohmann::ordered_json> extra_context) const override;
 
   absl::Status CloneStateImpl(
       const TypeSafeModelDataProcessor<Gemma3DataProcessorConfig,

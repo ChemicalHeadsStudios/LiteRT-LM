@@ -23,25 +23,26 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"  // from @com_google_absl
-#include "runtime/components/sentencepiece_tokenizer.h"
-#include "runtime/components/tokenizer.h"
+#include "absl/status/status_matchers.h"  // from @com_google_absl
+#include "absl/status/statusor.h"  // from @com_google_absl  // IWYU pragma: keep
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/config_registry.h"
+#include "runtime/conversation/model_data_processor/fastvlm_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/function_gemma_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/gemma3_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/gemma4_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/generic_data_processor_config.h"
+#include "runtime/conversation/model_data_processor/lfm2_data_processor_config.h"
 #include "runtime/conversation/model_data_processor/model_data_processor.h"
 #include "runtime/conversation/model_data_processor/qwen3_data_processor_config.h"
 #include "runtime/engine/io_types.h"
 #include "runtime/proto/llm_model_type.pb.h"
-#include "runtime/util/status_macros.h"  // NOLINT
-#include "runtime/util/test_utils.h"     // NOLINT
+#include "runtime/util/test_utils.h"  // IWYU pragma: keep
 
 namespace litert::lm {
 namespace {
 
-using ::testing::status::StatusIs;
+using ::absl_testing::StatusIs;
 
 constexpr char kTestdataDir[] =
     "litert_lm/runtime/components/testdata/";
@@ -80,6 +81,42 @@ TEST_F(ModelDataProcessorFactoryTest, CreateGenericModelDataProcessor) {
   EXPECT_THAT(processor->ToInputDataVector("test prompt", {},
                                            Gemma3DataProcessorArguments()),
               StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+TEST_F(ModelDataProcessorFactoryTest,
+       CreateGenericModelDataProcessorMultimodal) {
+  proto::LlmModelType llm_model_type;
+  auto* generic_model = llm_model_type.mutable_generic_model();
+  generic_model->set_image_enabled(true);
+  generic_model->set_audio_enabled(true);
+  generic_model->set_image_tensor_height(224);
+  generic_model->set_image_tensor_width(128);
+  generic_model->set_audio_sample_rate_hz(16000);
+  generic_model->set_audio_fft_padding_type(proto::FFT_PADDING_TYPE_CENTER);
+
+  ASSERT_OK_AND_ASSIGN(
+      auto config, CreateDataProcessorConfigFromLlmModelType(llm_model_type));
+  ASSERT_TRUE(std::holds_alternative<GenericDataProcessorConfig>(config));
+
+  const auto& generic_config = std::get<GenericDataProcessorConfig>(config);
+  ASSERT_TRUE(generic_config.multimodal.has_value());
+  EXPECT_TRUE(generic_config.multimodal->image_enabled);
+  EXPECT_TRUE(generic_config.multimodal->audio_enabled);
+
+  // Check target dimensions are set correctly.
+  const auto& dims = generic_config.multimodal->image_preprocess_parameter
+                         .GetTargetDimensions();
+  ASSERT_GE(dims.size(), 3);
+  EXPECT_EQ(dims[1], 224);
+  EXPECT_EQ(dims[2], 128);
+
+  // Check audio config fft padding type is set correctly.
+  EXPECT_EQ(
+      generic_config.multimodal->audio_preprocessor_config.GetFftPaddingType(),
+      AudioPreprocessorConfig::FftPaddingType::kCenter);
+
+  ASSERT_OK_AND_ASSIGN(auto processor, CreateModelDataProcessor(config));
+  EXPECT_NE(processor, nullptr);
 }
 
 TEST_F(ModelDataProcessorFactoryTest, CreateGemma3DataProcessor) {
@@ -220,6 +257,50 @@ TEST_F(ModelDataProcessorFactoryTest, CreateGemma4DataProcessor) {
   EXPECT_EQ(gemma4_config.max_num_patches, 1280);
   EXPECT_EQ(gemma4_config.patch_width, 8);
   EXPECT_EQ(gemma4_config.patch_height, 8);
+}
+
+TEST_F(ModelDataProcessorFactoryTest, CreateFastVlmDataProcessor) {
+  proto::LlmModelType llm_model_type;
+  llm_model_type.mutable_fast_vlm();
+  ASSERT_OK_AND_ASSIGN(
+      auto config, CreateDataProcessorConfigFromLlmModelType(llm_model_type));
+  ASSERT_TRUE(std::holds_alternative<FastVlmDataProcessorConfig>(config));
+  ASSERT_OK_AND_ASSIGN(auto processor, CreateModelDataProcessor(config));
+  EXPECT_OK(processor->ToInputDataVector("test prompt", {},
+                                         FastVlmDataProcessorArguments()));
+  EXPECT_THAT(processor->ToInputDataVector("test prompt", {},
+                                           GenericDataProcessorArguments()),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+
+  EXPECT_OK(
+      processor->ToMessage(Responses(TaskState::kProcessing, {"test response"}),
+                           FastVlmDataProcessorArguments()));
+
+  auto fastvlm_config = std::get<FastVlmDataProcessorConfig>(config);
+  EXPECT_EQ(fastvlm_config.image_tensor_height, 1024);
+  EXPECT_EQ(fastvlm_config.image_tensor_width, 1024);
+}
+
+TEST_F(ModelDataProcessorFactoryTest, CreateLfm2DataProcessor) {
+  proto::LlmModelType llm_model_type;
+  llm_model_type.mutable_lfm2();
+  ASSERT_OK_AND_ASSIGN(
+      auto config, CreateDataProcessorConfigFromLlmModelType(llm_model_type));
+  ASSERT_TRUE(std::holds_alternative<Lfm2DataProcessorConfig>(config));
+  ASSERT_OK_AND_ASSIGN(auto processor, CreateModelDataProcessor(config));
+  EXPECT_OK(processor->ToInputDataVector("test prompt", {},
+                                         Lfm2DataProcessorArguments()));
+  EXPECT_THAT(processor->ToInputDataVector("test prompt", {},
+                                           GenericDataProcessorArguments()),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+
+  EXPECT_OK(
+      processor->ToMessage(Responses(TaskState::kProcessing, {"test response"}),
+                           Lfm2DataProcessorArguments()));
+
+  auto lfm2_config = std::get<Lfm2DataProcessorConfig>(config);
+  EXPECT_EQ(lfm2_config.patch_width, 16);
+  EXPECT_EQ(lfm2_config.patch_height, 16);
 }
 
 }  // namespace

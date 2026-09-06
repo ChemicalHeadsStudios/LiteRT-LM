@@ -25,7 +25,8 @@
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
-#include "litert/cc/litert_environment.h"  // from @litert
+#include "litert/c/litert_common.h"  // from @litert
+#include "litert/cc/litert_environment_options.h"  // from @litert
 #include "litert/cc/litert_expected.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
@@ -57,6 +58,10 @@ Expected<int64_t> GetLastDimensionOfInput(const Signature& signature,
                                           absl::string_view input_name) {
   LITERT_ASSIGN_OR_RETURN(auto tensor, signature.InputTensor(input_name));
   LITERT_ASSIGN_OR_RETURN(auto type, tensor.RankedTensorType());
+  if (type.Layout().Rank() == 0) {
+    return litert::Unexpected(kLiteRtStatusErrorInvalidArgument,
+                              "Tensor rank must be at least 1");
+  }
   return type.Layout().Dimensions()[type.Layout().Rank() - 1];
 }
 
@@ -64,6 +69,10 @@ Expected<int64_t> GetFirstDimensionOfOutput(const Signature& signature,
                                             absl::string_view output_name) {
   LITERT_ASSIGN_OR_RETURN(auto tensor, signature.OutputTensor(output_name));
   LITERT_ASSIGN_OR_RETURN(auto type, tensor.RankedTensorType());
+  if (type.Layout().Rank() == 0) {
+    return litert::Unexpected(kLiteRtStatusErrorInvalidArgument,
+                              "Tensor rank must be at least 1");
+  }
   return type.Layout().Dimensions()[0];
 }
 
@@ -263,7 +272,8 @@ int64_t GetTargetNumber(int64_t magic_number, int64_t target_number_hint) {
 
 }  // namespace
 
-std::vector<Environment::Option> MagicNumberConfigsHelper::GetLiteRtEnvOptions(
+std::vector<EnvironmentOptions::Option>
+MagicNumberConfigsHelper::GetLiteRtEnvOptions(
     ModelResources& resources, const LlmExecutorSettings& executor_settings) {
   auto litert_model = resources.GetTFLiteModel(ModelType::kTfLitePrefillDecode);
   if (!litert_model.ok() || !*litert_model) return {};
@@ -290,7 +300,7 @@ std::vector<Environment::Option> MagicNumberConfigsHelper::GetLiteRtEnvOptions(
       magic_number_configs_,
       litert::options::CreateMagicNumberConfigs(num_configs), ([&]() {
         ABSL_LOG(ERROR) << "Failed to create LiteRT magic number configs";
-        return std::vector<Environment::Option>{};
+        return std::vector<EnvironmentOptions::Option>{};
       })());
 
   MagicNumbers target_numbers{.context_length = 0, .num_output_candidates = 0};
@@ -389,7 +399,7 @@ std::vector<Environment::Option> MagicNumberConfigsHelper::GetLiteRtEnvOptions(
           ([&]() {
             ABSL_LOG(ERROR)
                 << "Failed to create LiteRT magic number verifications";
-            return std::vector<Environment::Option>{};
+            return std::vector<EnvironmentOptions::Option>{};
           })());
       for (int i = 0; i < verify_pairs->size(); ++i) {
         auto& verification = magic_number_verifications_->verifications[i];
@@ -400,14 +410,14 @@ std::vector<Environment::Option> MagicNumberConfigsHelper::GetLiteRtEnvOptions(
     }
   }
 
-  std::vector<Environment::Option> env_options;
-  env_options.push_back(
-      Environment::Option{Environment::OptionTag::MagicNumberConfigs,
-                          static_cast<void*>(magic_number_configs_.get())});
+  std::vector<EnvironmentOptions::Option> env_options;
+  env_options.push_back(EnvironmentOptions::Option{
+      EnvironmentOptions::Tag::kMagicNumberConfigs,
+      static_cast<void*>(magic_number_configs_.get())});
 
   if (magic_number_verifications_) {
-    env_options.push_back(Environment::Option{
-        Environment::OptionTag::MagicNumberVerifications,
+    env_options.push_back(EnvironmentOptions::Option{
+        EnvironmentOptions::Tag::kMagicNumberVerifications,
         static_cast<void*>(magic_number_verifications_.get())});
   }
 

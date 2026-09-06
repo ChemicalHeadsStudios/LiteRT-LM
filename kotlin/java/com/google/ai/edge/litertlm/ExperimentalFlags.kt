@@ -36,10 +36,13 @@ object ExperimentalFlags {
   /**
    * Whether to enable speculative decoding.
    *
+   * If null, use the model's default. If true, enable speculative decoding; an error will be thrown
+   * if the model does not support it. If false, disable it.
+   *
    * Note: This flag is read only when a new [Engine] is created. Changing this value will not
    * affect any existing [Engine] or [Conversation] instances.
    */
-  var enableSpeculativeDecoding: Boolean = false
+  var enableSpeculativeDecoding: Boolean? = null
 
   /**
    * Whether to enable conversation constrained decoding. This is primarily used for function
@@ -69,6 +72,43 @@ object ExperimentalFlags {
    * affect any existing [Conversation] instances.
    */
   var convertCamelToSnakeCaseInToolDescription: Boolean = true
+
+  /**
+   * Whether to filter channel content from the KV cache.
+   *
+   * If true, channel content (e.g. reasoning) will be filtered from the KV cache.
+   *
+   * Note: This flag is read only when a new [Conversation] is created. Changing this value will not
+   * affect any existing [Conversation] instances.
+   */
+  var filterChannelContentFromKvCache: Boolean? = null
+
+  /**
+   * A prompt template to overwrite the default one.
+   *
+   * Note: This flag is read only when a new [Conversation] is created. Changing this value will not
+   * affect any existing [Conversation] instances.
+   */
+  var overwritePromptTemplate: String? = null
+
+  /**
+   * The visual token budget.
+   *
+   * The number of visual tokens that the model can generate for a single image. If null, there is
+   * no budget limit and the engine uses as much as needed.
+   *
+   * Currently, this is only supported by Gemma4. If this flag is set for a non-Gemma4 model, it
+   * will result in a no-op. The Gemma4 budget options are 70, 140, 280, 560, or 1120 tokens. See
+   * https://ai.google.dev/gemma/docs/capabilities/vision#variable-resolution for more details.
+   *
+   * Note:
+   * 1. This flag takes effect immediately and change alter the behavior of created [Conversation].
+   * 2. If the flag is set before the [Engine] is created, it determines the max visual tokens per
+   *    image for the [Engine]. For [Conversation] using the same [Engine], if the value is updated
+   *    after the [Conversation] is created, the value should not be set to a value that exceeds the
+   *    engine's max visual tokens per image.
+   */
+  var visualTokenBudget: Int? = null
 }
 
 // Mark this annotation itself as requiring opt-in

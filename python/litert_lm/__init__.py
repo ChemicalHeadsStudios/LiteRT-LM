@@ -14,51 +14,89 @@
 
 """LiteRT LM is a library for running GenAI models on devices."""
 
+# pylint: disable=g-importing-member
+
+from ._ffi import ActivationDataType
+from ._ffi import LiteRtLmBackendType
+from ._ffi import LiteRtLmConstraintProviderType
+from ._ffi import LiteRtLmModality
+from ._ffi import LiteRtLmNpuBrand
+from ._ffi import LogSeverity
+from ._ffi import set_min_log_severity
+from ._messages import Content
+from ._messages import Contents
+from ._messages import Message
+from ._messages import Role
+from ._messages import ToolCall
+from .benchmark import Benchmark
+from .conversation import Conversation
+from .embedding_engine import EmbeddingEngine
+from .embedding_engine import EmbeddingOptions
+from .embedding_engine import EmbeddingResponse
+from .embedding_engine import InputOverflowStrategy
+from .engine import Engine
 from .interfaces import AbstractBenchmark
 from .interfaces import AbstractConversation
 from .interfaces import AbstractEngine
 from .interfaces import AbstractSession
 from .interfaces import Backend
 from .interfaces import BenchmarkInfo
+from .interfaces import ConstrainedDecodingConfig
+from .interfaces import LoraConfig
+from .interfaces import LoraRankConfig
+from .interfaces import NoRepeatNgramConfig
+from .interfaces import RepetitionPenaltyConfig
+from .interfaces import ResponseFormat
 from .interfaces import Responses
+from .interfaces import SamplerConfig
+from .interfaces import SuppressTokensConfig
+from .interfaces import ThinkingConfig
+from .interfaces import Tool
 from .interfaces import ToolEventHandler
-from .litert_lm_ext import _Benchmark  # pytype: disable=import-error
-from .litert_lm_ext import _Engine  # pytype: disable=import-error
-from .litert_lm_ext import Benchmark  # pytype: disable=import-error
-from .litert_lm_ext import BenchmarkInfo as _BenchmarkInfo  # pytype: disable=import-error
-from .litert_lm_ext import Conversation  # pytype: disable=import-error
-from .litert_lm_ext import Engine  # pytype: disable=import-error
-from .litert_lm_ext import LogSeverity  # pytype: disable=import-error
-from .litert_lm_ext import Session  # pytype: disable=import-error
-from .litert_lm_ext import set_min_log_severity  # pytype: disable=import-error
-from .tools import Tool
+from .model_info import ModelInfo
+from .model_info import SupportedModalities
+from .session import Session
 from .tools import tool_from_function
-
-# Because the C++ class is created by nanobind and the Python
-# interface is a standard ABC, they cannot easily share a formal
-# inheritance tree across the C++/Python boundary. Instead, we use the
-# register() method in the package's entry point to set the
-# relationship.
-AbstractEngine.register(_Engine)
-AbstractConversation.register(Conversation)
-AbstractBenchmark.register(_Benchmark)
-BenchmarkInfo.register(_BenchmarkInfo)
-AbstractSession.register(Session)
 
 __all__ = (
     "AbstractBenchmark",
     "AbstractConversation",
     "AbstractEngine",
     "AbstractSession",
+    "ActivationDataType",
     "Backend",
     "Benchmark",
     "BenchmarkInfo",
+    "ConstrainedDecodingConfig",
+    "Content",
+    "Contents",
     "Conversation",
+    "EmbeddingEngine",
+    "EmbeddingOptions",
+    "EmbeddingResponse",
     "Engine",
+    "InputOverflowStrategy",
+    "LiteRtLmBackendType",
+    "LiteRtLmConstraintProviderType",
+    "LiteRtLmModality",
+    "LiteRtLmNpuBrand",
     "LogSeverity",
+    "LoraConfig",
+    "LoraRankConfig",
+    "Message",
+    "ModelInfo",
+    "NoRepeatNgramConfig",
+    "RepetitionPenaltyConfig",
+    "ResponseFormat",
     "Responses",
+    "Role",
+    "SamplerConfig",
     "Session",
+    "SupportedModalities",
+    "SuppressTokensConfig",
+    "ThinkingConfig",
     "Tool",
+    "ToolCall",
     "ToolEventHandler",
     "set_min_log_severity",
     "tool_from_function",

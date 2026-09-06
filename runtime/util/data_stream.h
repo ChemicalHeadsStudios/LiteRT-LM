@@ -58,7 +58,7 @@ class DataStream : public std::enable_shared_from_this<DataStream> {
   virtual absl::StatusOr<std::shared_ptr<DataStream>> OpenSubStream(
       uint64_t offset, uint64_t size);
 
- private:
+ protected:
   std::vector<std::pair<uint64_t, uint64_t>> locked_regions_;
 };
 
@@ -85,7 +85,7 @@ class SubStream : public DataStream {
       uint64_t offset, uint64_t size) override;
 
  private:
-  std::weak_ptr<DataStream> parent_;
+  std::shared_ptr<DataStream> parent_;
   uint64_t offset_;
   uint64_t size_;
 

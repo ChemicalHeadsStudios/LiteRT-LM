@@ -20,11 +20,15 @@
 #include <utility>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"  // from @com_google_absl
+#include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "runtime/util/data_stream.h"
 #include "runtime/util/file_util.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "runtime/util/scoped_file.h"
@@ -70,9 +74,9 @@ absl::StatusOr<Backend> GetBackendFromString(absl::string_view backend_str) {
     return Backend::GOOGLE_TENSOR_ARTISAN;
   } else {
     return absl::InvalidArgumentError(
-        absl::StrCat("Unsupported backend: ", backend_str,
-                     ". Supported backends are: [CPU, GPU, NPU, GPU_ARTISAN, "
-                     "CPU_ARTISAN, GOOGLE_TENSOR_ARTISAN]"));
+      absl::StrCat("Unsupported backend: ", backend_str,
+                   ". Supported backends are: [CPU, GPU, NPU, GPU_ARTISAN, "
+                   "CPU_ARTISAN, GOOGLE_TENSOR_ARTISAN]"));
   }
 }
 
@@ -94,9 +98,12 @@ std::ostream& operator<<(std::ostream& os,
 
 absl::StatusOr<ActivationDataType> GetActivationDataTypeFromString(
     const std::string& activation_data_type) {
-  if (absl::EqualsIgnoreCase(activation_data_type, "float32")) {
+  if (absl::EqualsIgnoreCase(activation_data_type, "float32") ||
+      absl::EqualsIgnoreCase(activation_data_type, "fp32") ||
+      absl::EqualsIgnoreCase(activation_data_type, "fp32_fp16")) {
     return ActivationDataType::FLOAT32;
-  } else if (absl::EqualsIgnoreCase(activation_data_type, "float16")) {
+  } else if (absl::EqualsIgnoreCase(activation_data_type, "float16") ||
+             absl::EqualsIgnoreCase(activation_data_type, "fp16")) {
     return ActivationDataType::FLOAT16;
   } else if (absl::EqualsIgnoreCase(activation_data_type, "int16")) {
     return ActivationDataType::INT16;
@@ -154,6 +161,12 @@ absl::StatusOr<ModelAssets> ModelAssets::Create(
 
 // static
 absl::StatusOr<ModelAssets> ModelAssets::Create(
+    std::shared_ptr<litert::lm::DataStream> data_stream) {
+  return ModelAssets(std::move(data_stream));
+}
+
+// static
+absl::StatusOr<ModelAssets> ModelAssets::Create(
     std::shared_ptr<litert::lm::ScopedFile> model_file,
     absl::string_view model_path) {
   return ModelAssets(std::move(model_file), model_path);
@@ -182,6 +195,9 @@ ModelAssets::ModelAssets(
     absl::string_view model_path)
     : path_(model_path), memory_mapped_file_(std::move(model_file)) {}
 
+ModelAssets::ModelAssets(std::shared_ptr<litert::lm::DataStream> data_stream)
+    : data_stream_(std::move(data_stream)) {}
+
 absl::StatusOr<absl::string_view> ModelAssets::GetPath() const {
   if (!path_.empty()) {
     return path_;
@@ -206,6 +222,14 @@ ModelAssets::GetMemoryMappedFile() const {
   return memory_mapped_file_;
 }
 
+absl::StatusOr<std::shared_ptr<DataStream>> ModelAssets::GetDataStream() const {
+  if (!HasDataStream()) {
+    return absl::InvalidArgumentError(
+        "Assets were not created with a data stream.");
+  }
+  return data_stream_;
+}
+
 absl::StatusOr<std::shared_ptr<ScopedFile>> ModelAssets::GetOrCreateScopedFile()
     const {
   if (HasScopedFile()) {
@@ -216,7 +240,7 @@ absl::StatusOr<std::shared_ptr<ScopedFile>> ModelAssets::GetOrCreateScopedFile()
         "Cannot create ScopedFile from MemoryMappedFile.");
   }
 
-  ASSIGN_OR_RETURN(auto scoped_file, ScopedFile::Open(path_));
+  ABSL_ASSIGN_OR_RETURN(auto scoped_file, ScopedFile::Open(path_));
   return std::make_shared<ScopedFile>(std::move(scoped_file));
 }
 
@@ -227,18 +251,65 @@ std::ostream& operator<<(std::ostream& os, const ModelAssets& model_assets) {
   } else if (model_assets.HasMemoryMappedFile()) {
     os << "model_file memory mapped file: "
        << model_assets.GetMemoryMappedFile().value()->data() << "\n";
+  } else if (model_assets.HasDataStream()) {
+    os << "model_file is loading from a data stream\n";
   } else {
-    os << "model_path: " << model_assets.GetPath().value() << "\n";
+    const auto& model_path = model_assets.GetPath();
+    if (model_path.ok()) {
+      os << "model_path: " << model_path.value() << "\n";
+    } else {
+      os << "model_path is empty \n";
+    }
   }
   os << "fake_weights_mode: " << model_assets.fake_weights_mode() << "\n";
   return os;
 }
 
+absl::StatusOr<ExecutorSettingsBase::CacheSuffix>
+ExecutorSettingsBase::GetCacheSuffix(Backend backend,
+                                     absl::string_view model_path,
+                                     absl::string_view module_name) {
+  if (backend != Backend::CPU && backend != Backend::GPU) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Unsupported backend for cache naming: ", GetBackendString(backend)));
+  }
+
+  static const auto* kValidModuleNames =
+      new absl::flat_hash_set<absl::string_view>{"",
+                                                 "vision_encoder",
+                                                 "vision_adapter",
+                                                 "streaming_audio_encoder",
+                                                 "audio_adapter",
+                                                 "static_audio_encoder"};
+  if (!kValidModuleNames->contains(module_name)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Invalid module name for cache naming: ", module_name));
+  }
+
+  CacheSuffix naming;
+  std::string module_part =
+      module_name.empty() ? "" : absl::StrCat(".", module_name);
+
+  if (backend == Backend::CPU) {
+    naming.weight_suffix = absl::StrCat(module_part, kXnnpackCacheSuffix);
+  } else if (backend == Backend::GPU) {
+    naming.program_suffix =
+        module_name.empty()
+            ? kMlDriftCacheSuffix
+            : absl::StrCat(".mldrift_program_cache.", module_name, ".bin");
+    naming.gpu_weight_cache_suffix =
+        module_name.empty() ? std::string(Basename(model_path))
+                            : absl::StrCat(Basename(model_path), module_part);
+  }
+  return naming;
+}
+
 absl::StatusOr<
     std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
-ExecutorSettingsBase::GetWeightCacheFile(absl::string_view suffix) const {
+ExecutorSettingsBase::GetWeightCacheFile(absl::string_view suffix,
+                                         bool check_and_clean) const {
   // Cache is explicitly disabled.
-  if (GetCacheDir() == ":nocache") {
+  if (GetCacheDir() == ":nocache" || disable_weight_cache_) {
     return absl::InvalidArgumentError("Cache is explicitly disabled.");
   }
 
@@ -247,26 +318,57 @@ ExecutorSettingsBase::GetWeightCacheFile(absl::string_view suffix) const {
     return GetScopedCacheFile();
   }
 
-  auto model_path = GetModelAssets().GetPath().value_or("");
-
-  // There is no model path to suffix.
+  const auto& model_path = GetModelAssets().GetPath().value_or("");
   if (model_path.empty()) {
+    // No model path to suffix and rest of the processing can be skipped.
     return absl::InvalidArgumentError(
-        "Cache path cannot be computed without knowing the model path.");
+        "Weight cache path cannot be computed with an empty model path.");
   }
 
+  // Get unique identifier based on the model file's content and metadata.
+  std::string metadata_id = "";
+  if (auto id_or = GetFileCacheIdentifier(model_path); id_or.ok()) {
+    metadata_id = absl::StrCat("_", *id_or);
+  } else {
+    ABSL_LOG(WARNING) << "GetFileCacheIdentifier failed for " << model_path
+                      << ": " << id_or.status();
+  }
+
+  std::string cache_path;
   if (GetCacheDir().empty()) {
-    return absl::StrCat(model_path, suffix);
+    cache_path = absl::StrCat(model_path, metadata_id, suffix);
+  } else {
+    ABSL_ASSIGN_OR_RETURN(
+        cache_path, JoinPath(GetCacheDir(), absl::StrCat(Basename(model_path),
+                                                         metadata_id, suffix)));
   }
 
-  return JoinPath(GetCacheDir(), absl::StrCat(Basename(model_path), suffix));
+  // Try to delete stale caches if the current cache file doesn't exist.
+  if (check_and_clean) {
+    if (!FileExists(cache_path)) {
+      std::string dir_to_clean = GetCacheDir().empty()
+                                     ? std::string(Dirname(model_path))
+                                     : GetCacheDir();
+      auto num_deleted_or =
+          DeleteStaleCaches(dir_to_clean, Basename(model_path), suffix);
+      if (!num_deleted_or.ok()) {
+        ABSL_LOG(WARNING) << "Failed to clean stale caches: "
+                          << num_deleted_or.status();
+      } else {
+        ABSL_VLOG(1) << "Deleted " << *num_deleted_or << " stale cache files.";
+      }
+    }
+  }
+
+  return cache_path;
 }
 
 absl::StatusOr<
     std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
-ExecutorSettingsBase::GetProgramCacheFile(absl::string_view suffix) const {
+ExecutorSettingsBase::GetProgramCacheFile(absl::string_view suffix,
+                                          bool check_and_clean) const {
   // Cache is explicitly disabled.
-  if (GetCacheDir() == ":nocache") {
+  if (GetCacheDir() == ":nocache" || disable_program_cache_) {
     return absl::InvalidArgumentError("Cache is explicitly disabled.");
   }
 
@@ -275,19 +377,51 @@ ExecutorSettingsBase::GetProgramCacheFile(absl::string_view suffix) const {
     return GetScopedProgramCacheFile();
   }
 
-  auto model_path = GetModelAssets().GetPath().value_or("");
-
-  // There is no model path to suffix.
+  const auto& model_path = GetModelAssets().GetPath().value_or("");
   if (model_path.empty()) {
+    // No model path to suffix and rest of the processing can be skipped.
     return absl::InvalidArgumentError(
-        "Cache path cannot be computed without knowing the model path.");
+        "Program cache path cannot be computed with an empty model path.");
   }
 
+  // Get unique identifier based on the model file's content and metadata.
+  std::string metadata_id = "";
+  if (auto id_or = GetFileCacheIdentifier(model_path); id_or.ok()) {
+    metadata_id = absl::StrCat("_", *id_or);
+  } else {
+    ABSL_LOG(WARNING) << "GetFileCacheIdentifier failed for " << model_path
+                      << ": " << id_or.status();
+  }
+
+  std::string cache_path;
   if (GetCacheDir().empty()) {
-    return absl::StrCat(model_path, suffix);
+    cache_path = absl::StrCat(model_path, metadata_id, suffix);
+  } else {
+    ABSL_ASSIGN_OR_RETURN(
+        cache_path, JoinPath(GetCacheDir(), absl::StrCat(Basename(model_path),
+                                                         metadata_id, suffix)));
   }
 
-  return JoinPath(GetCacheDir(), absl::StrCat(Basename(model_path), suffix));
+  // Try to delete stale caches if the current cache file doesn't exist.
+  if (check_and_clean) {
+    if (!FileExists(cache_path)) {
+      ABSL_VLOG(1) << "File does not exist: " << cache_path
+                   << " Cleaning stale caches.";
+      std::string dir_to_clean = GetCacheDir().empty()
+                                     ? std::string(Dirname(model_path))
+                                     : GetCacheDir();
+      auto num_deleted_or =
+          DeleteStaleCaches(dir_to_clean, Basename(model_path), suffix);
+      if (!num_deleted_or.ok()) {
+        ABSL_LOG(WARNING) << "Failed to clean stale caches: "
+                          << num_deleted_or.status();
+      } else {
+        ABSL_VLOG(1) << "Deleted " << *num_deleted_or << " stale cache files.";
+      }
+    }
+  }
+
+  return cache_path;
 }
 
 }  // namespace litert::lm

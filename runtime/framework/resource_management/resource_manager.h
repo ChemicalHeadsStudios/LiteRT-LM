@@ -31,12 +31,12 @@
 #include "runtime/components/model_resources.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
-#include "runtime/executor/audio_executor.h"
-#include "runtime/executor/audio_executor_settings.h"
+#include "runtime/executor/audio/audio_executor.h"
+#include "runtime/executor/audio/audio_executor_settings.h"
 #include "runtime/executor/llm_executor.h"
 #include "runtime/executor/llm_executor_settings.h"
-#include "runtime/executor/vision_executor.h"
-#include "runtime/executor/vision_executor_settings.h"
+#include "runtime/executor/vision/vision_executor.h"
+#include "runtime/executor/vision/vision_executor_settings.h"
 #include "runtime/framework/resource_management/context_handler/context_handler.h"
 
 namespace litert::lm {
@@ -52,14 +52,7 @@ class ResourceManager {
       std::unique_ptr<AudioExecutorSettings> audio_executor_settings,
       LlmExecutorSettings llm_executor_settings,
       ::litert::Environment* absl_nullable litert_env,
-      std::unique_ptr<AudioExecutor> audio_executor = nullptr)
-      :  // dummy comment to prevent clang-format from moving the next line here
-        llm_executor_(std::move(llm_executor)),
-        vision_executor_settings_(std::move(vision_executor_settings)),
-        audio_executor_(std::move(audio_executor)),
-        audio_executor_settings_(std::move(audio_executor_settings)),
-        litert_env_(litert_env),
-        llm_executor_settings_(std::move(llm_executor_settings)) {}
+      std::unique_ptr<AudioExecutor> audio_executor = nullptr);
 
   // Creates a ResourceManager with the provided llm_executor.
   // Note that the audio_executor is used for testing only (dependency
@@ -74,7 +67,7 @@ class ResourceManager {
       ::litert::Environment* absl_nullable litert_env,
       std::unique_ptr<AudioExecutor> absl_nullable audio_executor = nullptr);
 
-  ~ResourceManager() = default;
+  ~ResourceManager();
 
   // Assigns the lora id from the given lora path or scoped file. If no lora is
   // used, will return std::nullopt instead of an uint32_t id.
@@ -151,6 +144,18 @@ class ResourceManager {
   // Returns the vision executor properties.
   absl::StatusOr<VisionExecutorProperties> GetVisionExecutorProperties()
       ABSL_LOCKS_EXCLUDED(vision_executor_mutex_);
+
+  // Resets the LLM executor and clears the current context handler.
+  void ResetCurrentHandler() ABSL_LOCKS_EXCLUDED(executor_mutex_);
+
+  // Updates whether to enable Metal residency set on GPU at runtime.
+  absl::Status UpdateGpuEnableMetalResidencySet(bool enable_metal_residency_set)
+      ABSL_LOCKS_EXCLUDED(executor_mutex_);
+
+  // Updates the LLM executor settings.
+  absl::Status UpdateExecutorSettings(
+      const LlmExecutorSettings& executor_settings)
+      ABSL_LOCKS_EXCLUDED(executor_mutex_);
 
  private:
   // Creates the litert environment if it is not created yet.

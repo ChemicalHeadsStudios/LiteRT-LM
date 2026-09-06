@@ -29,6 +29,7 @@
 
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_format.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
@@ -177,7 +178,8 @@ absl::Status ReadValueTFromSection(
   LitertlmHeader header;
 
   // Read the header information.
-  RETURN_IF_ERROR(ReadHeaderFromLiteRTLM(litertlm_path, &header));  // NOLINT
+  ABSL_RETURN_IF_ERROR(
+      ReadHeaderFromLiteRTLM(litertlm_path, &header));  // NOLINT
 
   auto sections = header.metadata->section_metadata()->objects();
   // Check if the section_idx is valid.
@@ -200,6 +202,11 @@ absl::Status ReadValueTFromSection(
   // Calculate the size of the data.
   size_t end_offset = section->end_offset();
   size_t begin_offset = section->begin_offset();
+  if (begin_offset > end_offset) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Section %d has invalid offsets: begin_offset (%d) > end_offset (%d).",
+        section_idx, begin_offset, end_offset));
+  }
   size_t data_size = end_offset - begin_offset;
   if (data_size == 0) {
     return absl::InvalidArgumentError(
@@ -337,6 +344,14 @@ absl::Status DecompressData(const uint8_t* compressed_data,
   }
   uint64_t uncompressed_buffer_size;
   std::memcpy(&uncompressed_buffer_size, compressed_data, sizeof(uint64_t));
+
+  constexpr uint64_t kMaxUncompressedSize = 1ULL << 30;  // 1 GB
+  if (uncompressed_buffer_size > kMaxUncompressedSize) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Uncompressed size %d exceeds maximum allowed size %d.",
+                        uncompressed_buffer_size, kMaxUncompressedSize));
+  }
+
   output->resize(uncompressed_buffer_size);
 
   // Decompress the data.
@@ -365,13 +380,14 @@ absl::Status ReadSectionIntoHfTokenizerJsonData(
     const std::string& litertlm_path, uint64_t begin_offset,
     uint64_t end_offset, std::string* output) {
   std::vector<uint8_t> compressed_data;
-  RETURN_IF_ERROR(ReadSectionIntoBinaryData(litertlm_path,  // NOLINT
-                                            begin_offset, end_offset,
-                                            &compressed_data));
+  ABSL_RETURN_IF_ERROR(ReadSectionIntoBinaryData(litertlm_path,  // NOLINT
+                                                 begin_offset, end_offset,
+                                                 &compressed_data));
 
   std::vector<uint8_t> uncompressed_data;
-  RETURN_IF_ERROR(DecompressData(compressed_data.data(),  // NOLINT
-                                 compressed_data.size(), &uncompressed_data));
+  ABSL_RETURN_IF_ERROR(DecompressData(compressed_data.data(),  // NOLINT
+                                      compressed_data.size(),
+                                      &uncompressed_data));
   output->assign(reinterpret_cast<char*>(uncompressed_data.data()),
                  uncompressed_data.size());
 
@@ -463,7 +479,8 @@ absl::Status ReadAnyT(const std::string& litertlm_path, T* data,
   LitertlmHeader header;
 
   // Read the header information.
-  RETURN_IF_ERROR(ReadHeaderFromLiteRTLM(litertlm_path, &header));  // NOLINT
+  ABSL_RETURN_IF_ERROR(
+      ReadHeaderFromLiteRTLM(litertlm_path, &header));  // NOLINT
 
   // Search for the first section with the specified type.
   auto sections = header.metadata->section_metadata()->objects();

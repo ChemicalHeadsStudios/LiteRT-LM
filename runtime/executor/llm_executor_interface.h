@@ -1,3 +1,17 @@
+// Copyright 2026 The ODML Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #ifndef THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_INTERFACE_H_
 #define THIRD_PARTY_ODML_LITERT_LM_RUNTIME_EXECUTOR_LLM_EXECUTOR_INTERFACE_H_
 
@@ -9,8 +23,8 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/executor/executor_settings_base.h"
-#include "runtime/executor/kv_cache_interface.h"
 #include "runtime/executor/llm_executor_io_types.h"
+#include "runtime/executor/state_interface.h"
 
 namespace litert::lm {
 
@@ -21,12 +35,12 @@ class LlmExecutorBaseInterface {
   virtual ~LlmExecutorBaseInterface() = default;
 
   // Creates a KV cache with the appropriate configurations.
-  virtual absl::StatusOr<std::unique_ptr<KVCacheInterface>> CreateKVCache() = 0;
+  virtual absl::StatusOr<std::unique_ptr<StateInterface>> CreateKVCache() = 0;
 
   // Synchronous prefill operation. The executor is expected to update the KV
   // Cache with the provided input data.
   virtual absl::Status Prefill(ExecutorInputs&& input_data,
-                               KVCacheInterface& kv_cache,
+                               StateInterface& kv_cache,
                                std::optional<int> lora_id) = 0;
 
   // Loads a LoRA adapter with the provided model assets. Returns the ID of the
@@ -47,7 +61,7 @@ class LlmExecutorExternalSamplerInterface : public LlmExecutorBaseInterface {
   // update the KV Cache with the provided input data. The returned value is
   // logits for the provided input.
   virtual absl::StatusOr<TensorBuffer> Step(ExecutorInputs&& input_data,
-                                            KVCacheInterface& kv_cache,
+                                            StateInterface& kv_cache,
                                             std::optional<int> lora_id) = 0;
 };
 
@@ -59,7 +73,7 @@ class LlmExecutorInternalSamplerInterface : public LlmExecutorBaseInterface {
   // scheduling multiple back to back decode steps.
   // The function returns the sampled token ids.
   virtual absl::StatusOr<std::vector<int>> SampleTokens(
-      int num_steps, ExecutorInputs&& input_data, KVCacheInterface& kv_cache,
+      int num_steps, ExecutorInputs&& input_data, StateInterface& kv_cache,
       std::optional<int> lora_id) = 0;
 };
 

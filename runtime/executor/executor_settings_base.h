@@ -20,10 +20,13 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
+#include "runtime/util/data_stream.h"
 #include "runtime/util/memory_mapped_file.h"
 #include "runtime/util/scoped_file.h"
 
@@ -114,6 +117,8 @@ class ModelAssets {
   static absl::StatusOr<ModelAssets> Create(
       std::shared_ptr<MemoryMappedFile> model_file,
       absl::string_view model_path);
+  static absl::StatusOr<ModelAssets> Create(
+      std::shared_ptr<DataStream> data_stream);
 
   // Convenience factory function to create a ModelAssets with both a model
   // path and file. Will use the scoped file if both are provided.
@@ -122,12 +127,14 @@ class ModelAssets {
 
   bool HasScopedFile() const { return scoped_file_ != nullptr; }
   bool HasMemoryMappedFile() const { return memory_mapped_file_ != nullptr; }
+  bool HasDataStream() const { return data_stream_ != nullptr; }
 
   // Returns the model file if it was created with the respective variant,
   // otherwise returns an error.
   absl::StatusOr<absl::string_view> GetPath() const;
   absl::StatusOr<std::shared_ptr<ScopedFile>> GetScopedFile() const;
   absl::StatusOr<std::shared_ptr<MemoryMappedFile>> GetMemoryMappedFile() const;
+  absl::StatusOr<std::shared_ptr<DataStream>> GetDataStream() const;
 
   // Convenience method to get a read-only scoped file to the model file
   // regardless of whether this instance was created from a path or scoped file.
@@ -146,12 +153,14 @@ class ModelAssets {
   explicit ModelAssets(std::shared_ptr<MemoryMappedFile> model_file);
   explicit ModelAssets(std::shared_ptr<MemoryMappedFile> model_file,
                        absl::string_view model_path);
+  explicit ModelAssets(std::shared_ptr<DataStream> data_stream);
 
   // TODO: b/417814685 - Consider supporting multiple model files if the need
   // case arises.
   std::string path_;
   std::shared_ptr<ScopedFile> scoped_file_;
   std::shared_ptr<MemoryMappedFile> memory_mapped_file_;
+  std::shared_ptr<DataStream> data_stream_;
 
   FakeWeightsMode fake_weights_mode_ = FakeWeightsMode::FAKE_WEIGHTS_NONE;
 };
@@ -160,6 +169,42 @@ std::ostream& operator<<(std::ostream& os, const ModelAssets& model_assets);
 // Base Settings for the executor modules.
 class ExecutorSettingsBase {
  public:
+  // Holds centralized cache suffixes and keys for different backend topologies.
+  struct CacheSuffix {
+    std::string weight_suffix;            // For CPU (XNNPACK)
+    std::string program_suffix;           // For GPU (MlDrift) program cache
+    std::string gpu_weight_cache_suffix;  // For GPU (MlDrift) weight cache key
+  };
+
+  // Cache suffixes for different backend names. By default, the generate cache
+  // file names will have the following format:
+  //  XNNPACK: <model_path>.xnnpack_cache_<unique_id>
+  //  ML Drift Program Cache: <model_path>_<unique_id>_mldrift_program_cache.bin
+  //  ML Drift Weight Cache: <model_path>_<unique_id>
+  static constexpr absl::string_view kXnnpackCacheSuffix = ".xnnpack_cache";
+  static constexpr absl::string_view kMlDriftCacheSuffix =
+      "_mldrift_program_cache.bin";
+  static constexpr absl::string_view kMlDriftWeightCacheSuffix =
+      "_mldrift_weight_cache.bin";
+  static constexpr absl::string_view kMtpDrafterCacheSuffix = ".mtp_drafter";
+
+  // Dynamically generates cache suffix and keys systematically.
+  // Args:
+  //   - backend: The target backend topology. Valid values are Backend::CPU and
+  //   Backend::GPU.
+  //   - model_path: The absolute path to the modality main model file.
+  //   - module_name: The optional sub-module identifier. Valid values are empty
+  //   string (""),
+  //     "vision_encoder", "vision_adapter", "streaming_audio_encoder",
+  //     "audio_adapter", "static_audio_encoder".
+  // Returns:
+  //   - CacheSuffix: Centralized naming extensions.
+  //   - absl::Status: InvalidArgumentError if validation fails on backend or
+  //   module identifiers.
+  static absl::StatusOr<CacheSuffix> GetCacheSuffix(
+      Backend backend, absl::string_view model_path,
+      absl::string_view module_name = "");
+
   virtual ~ExecutorSettingsBase() = default;
 
   // Getter APIs.
@@ -180,15 +225,34 @@ class ExecutorSettingsBase {
     activation_data_type_ = activation_data_type;
   }
 
+  // Mixed precision APIs.
+  bool IsMixedPrecisionEnabled() const { return enable_mixed_precision_; }
+  void SetEnableMixedPrecision(bool enable) {
+    enable_mixed_precision_ = enable;
+  }
+
   // Should be used by consumers who want to write to a single weight cache
   // file. Returns, in order of preference:
   //   1. an open file descriptor to the weight cache file,
   //   2. the file path of the weight cache file, based on the given cache
   //      directory and/or model path. Will append `suffix`.
   //   3. an error if a weight cache file could not be determined.
+  virtual absl::StatusOr<
+      std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+  GetWeightCacheFile(absl::string_view suffix, bool check_and_clean) const;
+
   absl::StatusOr<
       std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
-  GetWeightCacheFile(absl::string_view suffix = ".cache") const;
+  GetWeightCacheFile() const {
+    return GetWeightCacheFile(".cache", false);
+  }
+
+  absl::StatusOr<
+      std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+  GetWeightCacheFile(absl::string_view suffix) const {
+    return GetWeightCacheFile(suffix, false);
+  }
+
   // Prefer to use `GetWeightCacheFile()` if possible.
   const std::string& GetCacheDir() const { return cache_dir_; }
   // Prefer to use `GetWeightCacheFile()` if possible.
@@ -205,9 +269,21 @@ class ExecutorSettingsBase {
   //   2. the file path of the program cache file, based on the given cache
   //      directory and/or model path. Will append `suffix`.
   //   3. an error if a program cache file could not be determined.
+  virtual absl::StatusOr<
+      std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+  GetProgramCacheFile(absl::string_view suffix, bool check_and_clean) const;
+
   absl::StatusOr<
       std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
-  GetProgramCacheFile(absl::string_view suffix = ".program_cache") const;
+  GetProgramCacheFile() const {
+    return GetProgramCacheFile(".program_cache", false);
+  }
+
+  absl::StatusOr<
+      std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>
+  GetProgramCacheFile(absl::string_view suffix) const {
+    return GetProgramCacheFile(suffix, false);
+  }
   // Prefer to use `GetProgramCacheFile()` if possible.
   std::shared_ptr<litert::lm::ScopedFile> GetScopedProgramCacheFile() const {
     return scoped_program_cache_file_;
@@ -226,6 +302,13 @@ class ExecutorSettingsBase {
       std::shared_ptr<litert::lm::ScopedFile> cache_file) {
     scoped_program_cache_file_ = std::move(cache_file);
   }
+
+  void SetDisableWeightCache(bool disable) { disable_weight_cache_ = disable; }
+  void SetDisableProgramCache(bool disable) {
+    disable_program_cache_ = disable;
+  }
+  bool IsWeightCacheDisabled() const { return disable_weight_cache_; }
+  bool IsProgramCacheDisabled() const { return disable_program_cache_; }
 
  protected:
   explicit ExecutorSettingsBase(ModelAssets model_assets)
@@ -259,12 +342,19 @@ class ExecutorSettingsBase {
   // OpenCL backend only support fp32 on Linux.
   std::optional<ActivationDataType> activation_data_type_;
 
+  // Optional setting to enable mixed precision. If true, it will override
+  // activation data type to FP32 which underlying for mix precision.
+  bool enable_mixed_precision_ = false;
+
   // Optional LoRA model assets.
   std::optional<ModelAssets> lora_model_assets_;
 
   // LiteRT dispatch library directory. If not set, the runtime will look for
   // the library in the path defined as the environment variables.
   std::string litert_dispatch_lib_dir_;
+
+  bool disable_weight_cache_ = false;
+  bool disable_program_cache_ = false;
 };
 
 }  // namespace litert::lm

@@ -16,17 +16,21 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/status/status.h"  // from @com_google_absl
+#include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
+#include "absl/strings/match.h"  // from @com_google_absl
 #include "absl/strings/str_cat.h"  // from @com_google_absl
+#include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/strings/substitute.h"  // from @com_google_absl
-#include "runtime/components/tokenizer.h"
 #include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/proto/llm_model_type.pb.h"
 #include "runtime/proto/token.pb.h"
 #include "runtime/util/status_macros.h"  // IWYU pragma: keep
+#include "support/tokenizer/tokenizer.h"
 
 namespace litert::lm {
 namespace {
@@ -64,8 +68,8 @@ absl::StatusOr<proto::LlmModelType> CreateModelType(
     return model_type;
   }
   proto::LlmModelType model_type;
-  ASSIGN_OR_RETURN(auto audio_token_ids,
-                   tokenizer->TextToTokenIds("<start_of_audio>"));
+  ABSL_ASSIGN_OR_RETURN(auto audio_token_ids,
+                        tokenizer->TextToTokenIds("<start_of_audio>"));
   if (IsGemma3nModel(start_turn_text, audio_token_ids)) {
     PopulateDefaultGemma3N(*model_type.mutable_gemma3n());
     return model_type;
@@ -114,7 +118,8 @@ absl::StatusOr<proto::LlmModelType> InferLlmModelType(
         return start_turn_text.status();
       }
     }
-    ASSIGN_OR_RETURN(model_type, CreateModelType(*start_turn_text, tokenizer));
+    ABSL_ASSIGN_OR_RETURN(model_type,
+                          CreateModelType(*start_turn_text, tokenizer));
     // If the model type is not generic, we can stop checking.
     if (model_type.model_type_case() != proto::LlmModelType::kGenericModel) {
       break;
@@ -365,10 +370,7 @@ absl::StatusOr<std::string> GetDefaultJinjaPromptTemplate(
 {%- if add_generation_prompt -%}
     {{'<start_of_turn>model\n'}}
 {%- endif -%})tmpl";
-    case proto::LlmModelType::kQwen3:
-    case proto::LlmModelType::kQwen2P5:
-    case proto::LlmModelType::kGenericModel:
-    case proto::LlmModelType::kGemma4:
+    case proto::LlmModelType::kFastVlm:
       // absl::Substitute takes up to 10 arguments, so we have to split the
       // template into two parts.
       return absl::StrCat(
@@ -377,7 +379,7 @@ absl::StatusOr<std::string> GetDefaultJinjaPromptTemplate(
                            "{%- if message.role == 'user' %}"
                            "$0{{ message.content }}$1"
                            "{% endif -%}"
-                           "{%- if message.role == 'model' %}"
+                           "{%- if message.role == 'assistant' %}"
                            "$2{{ message.content }}$3"
                            "{% endif -%}"
                            "{%- if message.role == 'system' %}"
@@ -392,7 +394,67 @@ absl::StatusOr<std::string> GetDefaultJinjaPromptTemplate(
                            prompt_templates.system().suffix()),
           absl::Substitute("{%- if message.role == 'user' %}"
                            "$0"
-                           "{% elif message.role == 'model' %}"
+                           "{% elif message.role == 'assistant' %}"
+                           "$1"
+                           "{% elif message.role == 'system' %}"
+                           "$2"
+                           "{% endif -%}"
+                           "{%- for item in message['content'] %}"
+                           "{%- if item['type'] == 'text' %}"
+                           "{{ item['text'] }}"
+                           "{% elif item['type'] == 'image' -%}"
+                           "<image_soft_token>"
+                           "{%- elif item['type'] == 'audio' -%}"
+                           ""
+                           "{%- endif -%}"
+                           "{%- endfor -%}"
+                           "{%- if message.role == 'user' %}"
+                           "$3"
+                           "{% elif message.role == 'assistant' %}"
+                           "$4"
+                           "{% elif message.role == 'system' %}"
+                           "$5"
+                           "{% endif -%}"
+                           "{%- endif -%}"
+                           "{%- endfor -%}"
+                           "{%- if add_generation_prompt %}"
+                           "$6"
+                           "{% endif -%}",
+                           prompt_templates.user().prefix(),
+                           prompt_templates.model().prefix(),
+                           prompt_templates.system().prefix(),
+                           prompt_templates.user().suffix(),
+                           prompt_templates.model().suffix(),
+                           prompt_templates.system().suffix(),
+                           prompt_templates.model().prefix()));
+    case proto::LlmModelType::kQwen3:
+    case proto::LlmModelType::kQwen2P5:
+    case proto::LlmModelType::kGenericModel:
+    case proto::LlmModelType::kGemma4:
+      // absl::Substitute takes up to 10 arguments, so we have to split the
+      // template into two parts.
+      return absl::StrCat(
+          absl::Substitute("{%- for message in messages -%}"
+                           "{%- if message.content is string -%}"
+                           "{%- if message.role == 'user' %}"
+                           "$0{{ message.content }}$1"
+                           "{% endif -%}"
+                           "{%- if message.role == 'assistant' %}"
+                           "$2{{ message.content }}$3"
+                           "{% endif -%}"
+                           "{%- if message.role == 'system' %}"
+                           "$4{{ message.content }}$5"
+                           "{% endif -%}"
+                           "{%- else -%}",
+                           prompt_templates.user().prefix(),
+                           prompt_templates.user().suffix(),
+                           prompt_templates.model().prefix(),
+                           prompt_templates.model().suffix(),
+                           prompt_templates.system().prefix(),
+                           prompt_templates.system().suffix()),
+          absl::Substitute("{%- if message.role == 'user' %}"
+                           "$0"
+                           "{% elif message.role == 'assistant' %}"
                            "$1"
                            "{% elif message.role == 'system' %}"
                            "$2"
@@ -408,7 +470,7 @@ absl::StatusOr<std::string> GetDefaultJinjaPromptTemplate(
                            "{%- endfor -%}"
                            "{%- if message.role == 'user' %}"
                            "$3"
-                           "{% elif message.role == 'model' %}"
+                           "{% elif message.role == 'assistant' %}"
                            "$4"
                            "{% elif message.role == 'system' %}"
                            "$5"
@@ -427,7 +489,37 @@ absl::StatusOr<std::string> GetDefaultJinjaPromptTemplate(
                            prompt_templates.model().prefix()));
     case proto::LlmModelType::MODEL_TYPE_NOT_SET:
       return absl::InvalidArgumentError("LlmModelType is not set.");
+    default:
+      return absl::InvalidArgumentError("Unsupported model type for template.");
   }
+}
+
+absl::string_view GetModelTypeName(const proto::LlmModelType& model_type) {
+  switch (model_type.model_type_case()) {
+    case proto::LlmModelType::kGenericModel:
+      return "generic_model";
+    case proto::LlmModelType::kGemma3N:
+      return "gemma3n";
+    case proto::LlmModelType::kFunctionGemma:
+      return "function_gemma";
+    case proto::LlmModelType::kGemma3:
+      return "gemma3";
+    case proto::LlmModelType::kQwen3:
+      return "qwen3";
+    case proto::LlmModelType::kQwen2P5:
+      return "qwen2p5";
+    case proto::LlmModelType::kGemma4:
+      return "gemma4";
+    case proto::LlmModelType::kFastVlm:
+      return "fast_vlm";
+    case proto::LlmModelType::kLfm2:
+      return "lfm2";
+    case proto::LlmModelType::kMinicpm5:
+      return "minicpm5";
+    case proto::LlmModelType::MODEL_TYPE_NOT_SET:
+      return "Not set";
+  }
+  return "Unknown";
 }
 
 }  // namespace litert::lm

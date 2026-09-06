@@ -40,9 +40,6 @@
 #
 # Default build options. These are applied first and unconditionally.
 
-# Shlibs built from the source tree should resolve symbols in the exectuable.
-build --define=resolve_symbols_in_exec=true
-
 # Exclude OpenCL from Linux and Windows builds.
 build:linux --copt=-DLITERT_DISABLE_OPENCL_SUPPORT=1
 build:windows --copt=/DLITERT_DISABLE_OPENCL_SUPPORT=1
@@ -161,6 +158,8 @@ build:android_x86_64 --platforms=@org_tensorflow//tensorflow/tools/toolchains/an
 build:android --dynamic_mode=off
 # TODO(belitskiy): Remove once on Clang 20.
 build:android --define=xnn_enable_avxvnniint8=false
+# Ensure OpenCL is not inadvertently disabled when cross-compiling from a Linux host.
+build:android --copt=-ULITERT_DISABLE_OPENCL_SUPPORT
 
 # Sets the default Apple platform to macOS.
 build:macos --apple_platform_type=macos
@@ -185,7 +184,7 @@ build:macos_arm64 --platforms=@build_bazel_apple_support//platforms:darwin_arm64
 
 # iOS configs for each architecture and the fat binary builds.
 build:ios --apple_platform_type=ios
-build:ios --copt=-fembed-bitcode
+# build:ios --copt=-fembed-bitcode
 build:ios --copt=-Wno-c++11-narrowing
 build:ios --ios_minimum_os=13.0
 build:ios_armv7 --config=ios
@@ -239,9 +238,6 @@ build:nonccl --define=no_nccl_support=true
 build:dynamic_kernels --define=dynamic_loaded_kernels=true
 build:dynamic_kernels --copt=-DAUTOLOAD_DYNAMIC_KERNELS
 
-# Don't trigger --config=<host platform> when cross-compiling.
-build:android --noenable_platform_specific_config
-build:ios --noenable_platform_specific_config
 
 # Suppress all C++ compiler warnings, otherwise build logs become 10s of MBs.
 build:android --copt=-w
@@ -266,6 +262,8 @@ build:linux --copt="-Werror=unused-result"
 # Add switch as an error on Linux.
 build:linux --copt="-Wswitch"
 build:linux --copt="-Werror=switch"
+# Suppress switch-default warnings on Linux. Skia has a lot of these.
+build:linux --copt="-Wno-switch-default"
 # This was added in clang-16 by https://reviews.llvm.org/D133574.
 # Can be removed once upb is updated, since a type definition is used within
 # offset of in the current version of ubp.
@@ -278,6 +276,7 @@ build:release_cpu_linux --repo_env=TF_SYSROOT="/dt9"
 
 # Linux ARM64 specific options
 build:linux_arm64 --copt="-mtune=generic" --copt="-march=armv8-a" --copt="-O3"
+build:linux_arm64 --define=litert_enable_ynnpack=true
 
 # On Windows, `__cplusplus` is wrongly defined without this switch
 # See https://devblogs.microsoft.com/cppblog/msvc-now-correctly-reports-__cplusplus/
@@ -505,6 +504,7 @@ build:rbe_linux --linkopt=-lm
 build:rbe_linux --host_linkopt=-lm
 
 build:rbe_linux_cpu --config=rbe_linux
+
 # Linux cpu and cuda builds share the same toolchain now.
 build:rbe_linux_cpu --host_crosstool_top="@local_config_cuda//crosstool:toolchain"
 build:rbe_linux_cpu --crosstool_top="@local_config_cuda//crosstool:toolchain"
@@ -542,3 +542,14 @@ build --host_features=-layering_check
 
 build --features=-header_modules
 build --host_features=-header_modules
+
+# TODO : b/501457260 Investigate supporting C++20 by upgrading to glibc 2.35 sysroot in future.
+# Hermetic Linux x86_64 build targeting glibc 2.31 (used by Kokoro)
+build:hermetic_linux --@rules_ml_toolchain//common:enable_hermetic_cc=True
+build:hermetic_linux --repo_env=USE_HERMETIC_CC_TOOLCHAIN=1
+build:hermetic_linux --extra_toolchains=@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64
+build:hermetic_linux --host_crosstool_top=@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64
+build:hermetic_linux --cxxopt=-std=c++17
+build:hermetic_linux --host_cxxopt=-std=c++17
+build:hermetic_linux --repo_env=SYSROOT_DIST=linux_glibc_2_31
+
