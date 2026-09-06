@@ -462,7 +462,13 @@ cc_binary(
         "@platforms//os:windows": [
             "/DEF:$(location @litert//litert/c:windows_exported_symbols.def)",
         ],
-        "//conditions:default": [],
+        # A soname so dependents record the library by name rather than by the
+        # path it was linked from, and $ORIGIN so its own dependencies (the
+        # constraint provider) resolve next to it wherever it is installed.
+        "//conditions:default": [
+            "-Wl,-soname,liblitert_lm_capi.so",
+            "-Wl,-rpath,$$ORIGIN",
+        ],
     }),
     linkshared = True,
     visibility = ["//visibility:public"],
